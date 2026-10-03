@@ -137,6 +137,7 @@ on processPDFs(theFiles, optionsText)
 		set workerPath to POSIX path of («event sysorpth» "duplex.js")
 		set pdfPath to POSIX path of (item 1 of theFiles)
 		set pdfName to name of («event sysonfo4» (item 1 of theFiles))
+		if pdfName ends with ".pdf.pdf" then set pdfName to text 1 thru ((count of pdfName) - 4) of pdfName
 		set tempDir to «event sysoexec» "/usr/bin/mktemp -d -t hp117w-duplex"
 		set pageCount to («event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --count " & quoted form of pdfPath) as integer
 		set sheetCount to (pageCount + 1) div 2
