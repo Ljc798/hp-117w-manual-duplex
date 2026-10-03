@@ -1,0 +1,11 @@
+#!/bin/bash
+
+APP="$HOME/Applications/HP 117w Manual Duplex.app"
+SPOOL="${3:-}"
+
+if [ -z "$SPOOL" ] || [ ! -f "$SPOOL" ]; then
+	exit 0
+fi
+
+/usr/bin/open -a "$APP" "$SPOOL" >/dev/null 2>&1 || true
+exit 0
