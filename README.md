@@ -6,6 +6,16 @@
 
 一个 macOS PDF 服务，用于没有自动双面器的打印机。它将 PDF 拆成正反两次单面打印，并在两次打印之间提示重新放纸。
 
+### 体验更新
+
+- “打印 / 记录 / 设置”导航：当前流程与主要按钮优先显示，历史和缓存管理独立。
+- PDF 逐页图片预览与完整 PDF 打开入口；开始前可选择页码范围、单双面和 1–10 份，并显示预计用纸。
+- 多份打印逐份完成放纸流程，后续副本进入待打印列表；每份开始前仍需确认。
+- 手机可一次选择多份 PDF，先加入待打印列表，预览确认后才打开 Mac 工作流；列表最多 30 份。
+- 历史记录支持按文件名、备注搜索，以及成功 / 需处理筛选。
+- 中断流程显示上次阶段。检查纸张和打印中心后，可结束中断流程，或用新纸重新准备；未完成队列存在时不会重启打印。不会自动从背面继续，避免猜测已出纸数量。
+- 缓存管理显示占用空间，将 PDF 和预览图片移到 macOS 废纸篓，打印历史保留。正在操作或排队的文件不能清理。
+
 ### 手机控制
 
 首次连接后，在 Safari 选择“分享 → 添加到主屏幕”。以后打开固定图标即可，无需重新扫码；Mac 与手机需在同一 Wi-Fi。界面支持中文 / English 切换并记住选择。
@@ -50,7 +60,7 @@
 
 ### 限制
 
-- A4、黑白、单份、每页一面为固定设置。手机补打可以选择单面模式。
+- A4、黑白、单份、每页一面为固定设置。手机确认和补打可以选择单面模式；多份逐份引导。
 - 页数是 PDF 服务交来的 PDF 页数；日志不包含源文件里的原始页码范围。
 - 备注在打印结束后出现。
 - `install.sh` 会将旧应用备份到相邻的 `.backup.<时间>` 路径。
@@ -58,6 +68,16 @@
 ## English
 
 A macOS PDF Service for printers without an automatic duplexer. It prepares the PDF for two single-sided passes and prompts you to reload the paper between them.
+
+### Experience update
+
+- **Print / History / Settings** navigation prioritizes the current step and primary action.
+- Page-by-page image previews and a full PDF link. Choose a page range, duplex or single-sided mode, and 1–10 copies before starting; see the estimated sheet count.
+- Each copy is a separate guided session. Extra copies enter the waiting list; every copy still requires explicit confirmation.
+- Select multiple PDFs on your phone and add them to a waiting list (up to 30 documents). Uploading does not launch a print session until you choose **Review & print**.
+- Search history by filename or note and filter completed versus unconfirmed/partial records.
+- Interrupted workflows show their last stage. After checking paper and Print Center, close the session or prepare it again on fresh paper. Recovery is blocked while unfinished printer jobs remain. The app never guesses which sheets printed or automatically resumes a back-side pass.
+- Cache management shows disk use and moves unused PDFs and previews to macOS Trash, retaining history. Active and queued sources are protected.
 
 ### Phone controls
 
@@ -102,7 +122,7 @@ This repository is configured for the HP Laser MFP 117w queue and its manual pap
 
 ### Limitations
 
-- A4, black and white, one copy, and one page per side are fixed settings. Phone reprints can also use single-sided mode.
+- A4, black and white, one copy, and one page per side are fixed settings. Phone review settings and reprints support single-sided mode; each copy is processed as a separate guided session.
 - The page count is for the PDF received by the service; the log does not include the original document page range.
 - The optional note prompt appears after printing.
 - `install.sh` backs up an existing app beside it as `.backup.<timestamp>`.

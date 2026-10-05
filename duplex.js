@@ -56,6 +56,15 @@ function run(args) {
         if(!rep.representationUsingTypeProperties($.NSPNGFileType,$.NSDictionary.dictionary).writeToFileAtomically(args[2],true)) throw Error('QR generation failed');
         return 'OK';
     }
+    if(args[0]==='--thumbnail') {
+        ObjC.import('AppKit');
+        var d=openDocument(args[1]), index=Number(args[3])-1;
+        if(index<0 || index>=Number(d.pageCount) || Math.floor(index)!==index) throw Error('Invalid page');
+        var img=d.pageAtIndex(index).thumbnailOfSizeForBox($.NSMakeSize(650,900),$.kPDFDisplayBoxMediaBox);
+        var rep=$.NSBitmapImageRep.imageRepWithData(img.TIFFRepresentation);
+        if(!rep.representationUsingTypeProperties($.NSPNGFileType,$.NSDictionary.dictionary).writeToFileAtomically(args[2],true)) throw Error('Could not render preview');
+        return 'OK';
+    }
     if(args[0]==='--extract') {
         var src=openDocument(args[1]), first=Number(args[3]), last=Number(args[4]);
         if(Math.floor(first)!==first || Math.floor(last)!==last || first<1 || last<first || last>Number(src.pageCount)) throw Error('Invalid page range');

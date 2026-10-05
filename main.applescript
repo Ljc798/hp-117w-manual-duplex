@@ -128,7 +128,8 @@ on processPDFs(theFiles, optionsText)
 	set helperPath to POSIX path of (path to resource "mobile.py")
 	set keepAwakePID to ""
 	set sourcePath to POSIX path of (item 1 of theFiles)
-	set currentMode to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " begin " & quoted form of sourcePath & " " & quoted form of queueName & " " & quoted form of printerLabel
+	set ownerPID to do shell script "echo $PPID"
+	set currentMode to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " begin " & quoted form of sourcePath & " " & quoted form of queueName & " " & quoted form of printerLabel & " " & ownerPID
 	try
 		set mobileURL to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " start"
 		open location mobileURL
@@ -174,13 +175,19 @@ on processMobilePDFs(theFiles, optionsText)
 		set sheetCount to (pageCount + 1) div 2
 		if currentMode is "single" then set sheetCount to pageCount
 		set oddCount to (pageCount mod 2 is 1) and pageCount > 1 and currentMode is not "single"
-		set prepareResult to «event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --prepare " & quoted form of pdfPath & " " & quoted form of tempDir & " 1 " & (pageCount as text)
+
 		set firstPassDescription to "First: every other page of the supplied PDF, in ascending order."
 		set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1–" & pageCount & "." & return & "A4, black and white, one copy, one page per side." & return & return & pageCount & " pages / " & sheetCount & " sheets." & return & firstPassDescription & return & "Pause: reload and tap Continue on your iPhone." & return & "Last: remaining pages in reverse order, rotated 180 degrees."
 		if oddCount then set intro to intro & return & return & "Odd number of pages: set aside the last sheet before reloading. Its back stays blank."
 		if pageCount is 1 then set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1." & return & "A4, black and white, one copy." & return & return & "Only one side will print."
 		set intro to intro & return & return & "Nothing prints until you click Print First Side."
 		my askUser(intro, "Print First Side")
+		set currentMode to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " mode"
+		set pageCount to (do shell script "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --count " & quoted form of pdfPath) as integer
+		set sheetCount to (pageCount + 1) div 2
+		if currentMode is "single" then set sheetCount to pageCount
+		set oddCount to (pageCount mod 2 is 1) and pageCount > 1 and currentMode is not "single"
+		set prepareResult to «event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --prepare " & quoted form of pdfPath & " " & quoted form of tempDir & " 1 " & (pageCount as text)
 		if my pendingJobs() is not "" then error "The printer has unfinished jobs. Wait for them to finish and start this helper again. This helper has not printed anything."
 		set firstAttempted to true
 		if currentMode is "single" then

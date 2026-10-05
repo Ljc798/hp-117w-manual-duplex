@@ -121,12 +121,28 @@ def import_excel_history():
     (STATE / 'excel-imported').touch()
 
 
+def owner_alive(job):
+    pid = job.get('owner_pid')
+    if not pid:
+        return True  # Existing sessions and test callers have no recorded owner.
+    try:
+        return str(APP / 'Contents/MacOS/droplet') in command(['/bin/ps', '-p', str(pid), '-o', 'command='], timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def active_job():
     job = read('active.json', {})
     if job.get('pending') and time.time() - job.get('reserved_at', 0) > 90:
         write('active.json', {})
         write('prompt.json', {'id': secrets.token_hex(16), 'key': 'launch_error', 'message': '', 'stage': 'error', 'buttons': []})
         return {}
+    if job and not job.get('pending') and not owner_alive(job):
+        job['interrupted'] = True
+        write('active.json', job)
+        prompt = read('prompt.json', {})
+        if prompt.get('key') != 'recovery':
+            write('prompt.json', {'id': secrets.token_hex(16), 'key': 'recovery', 'stage': 'error', 'message': '', 'buttons': []})
     return job
 
 
@@ -134,15 +150,20 @@ def state():
     with locked():
         job = active_job()
         prompt = read('prompt.json', {'id': 'idle', 'key': 'idle', 'message': '', 'buttons': [], 'stage': 'ready'})
-        prompt['job'] = {k: job[k] for k in ('id', 'name', 'pages', 'sheets', 'printer', 'mode') if k in job}
+        prompt['job'] = {k: job[k] for k in ('id', 'name', 'pages', 'sheets', 'printer', 'mode', 'interrupted', 'phase', 'copy_index', 'copy_total') if k in job}
         prompt['active'] = bool(job)
-        prompt['version'] = 2
+        prompt['version'] = 3
+        prompt['queued'] = len(read('queue.json', []))
         return prompt
 
 
 def publish(message='', buttons=(), key='notice', stage='ready', note=False):
     ident = secrets.token_hex(16)
     with locked():
+        job = active_job()
+        if job:
+            job['phase'] = stage
+            write('active.json', job)
         write('prompt.json', {'id': ident, 'message': message, 'key': key, 'stage': stage, 'buttons': list(buttons), 'note': note})
     return ident
 
@@ -152,6 +173,8 @@ def answer(data):
         prompt = read('prompt.json', {})
         if data.get('id') != prompt.get('id') or data.get('button') not in prompt.get('buttons', []):
             return False
+        if data.get('button') == 'Print First Side':
+            apply_settings(active_job(), data.get('settings', {}))
         write('prompt.json', {**prompt, 'id': secrets.token_hex(16), 'key': 'processing', 'message': '', 'buttons': []})
         write('answer.json', data)
     return True
@@ -225,7 +248,7 @@ def new_job(source, name, queue='', printer='', mode='duplex', ident=None):
     return job
 
 
-def begin(source, queue, printer):
+def begin(source, queue, printer, owner_pid=None):
     with locked():
         current = active_job()
         if current and (not current.get('pending') or Path(current['source']).resolve() != Path(source).resolve()):
@@ -235,6 +258,8 @@ def begin(source, queue, printer):
             job = current
         else:
             job = new_job(source, Path(source).name.removesuffix('.pdf.pdf') + ('.pdf' if Path(source).name.endswith('.pdf.pdf') else ''), queue, printer)
+        if owner_pid:
+            job['owner_pid'] = int(owner_pid)
         write('active.json', job)
         write('jobs/' + job['id'] + '/job.json', job)
         return job['mode']
@@ -250,14 +275,16 @@ def record(name, pages, sheets, status, note):
                 int(pages), int(sheets), job.get('printer', ''), status, note))
 
 
-def history():
+def history(query='', status='all'):
     with locked():
         try:
             import_excel_history()
         except (OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError, IndexError, StopIteration):
             pass
         with db() as conn:
-            result = [dict(row) for row in conn.execute('SELECT * FROM records ORDER BY printed_at DESC LIMIT 200')]
+            pattern = '%' + query[:200] + '%'
+            condition = '1=1' if status == 'all' else "status='Printed'" if status == 'printed' else "status!='Printed'"
+            result = [dict(row) for row in conn.execute('SELECT * FROM records WHERE (name LIKE ? OR note LIKE ?) AND ' + condition + ' ORDER BY printed_at DESC LIMIT 200', (pattern, pattern))]
         for item in result:
             item['can_reprint'] = (STATE / 'jobs' / item['id'] / 'source.pdf').is_file()
         return result
@@ -278,14 +305,16 @@ def launch_job(job):
         raise
 
 
-def upload_pdf(data, name):
+def upload_pdf(data, name, draft=False):
     if not data or len(data) > MAX_UPLOAD or b'%PDF-' not in data[:1024]:
         raise ValueError('invalid_pdf')
     # Names are display-only; files live under a generated private job ID.
     name = Path(name.replace('\\', '/')).name[:160]
     name = ''.join(c for c in name if ord(c) >= 32) or 'Uploaded.pdf'
     with locked():
-        if active_job():
+        if draft and len(read('queue.json', [])) >= 30:
+            raise ValueError('queue_full')
+        if not draft and active_job():
             raise ValueError('busy')
         ident = secrets.token_hex(16)
         directory = STATE / 'jobs' / ident
@@ -293,7 +322,13 @@ def upload_pdf(data, name):
         source = directory / 'source.pdf'
         source.write_bytes(data)
         job = new_job(source, name, ident=ident)
-        launch_job(job)
+        if draft:
+            queue = read('queue.json', [])
+            if len(queue) >= 30:
+                raise ValueError('queue_full')
+            write('queue.json', queue + [job['id']])
+        else:
+            launch_job(job)
         return job['id']
 
 
@@ -323,6 +358,153 @@ def reprint(data):
         job = new_job(extracted, row['name'] + ' (pages %s–%s)' % (first, last), mode=mode, ident=new_id)
         launch_job(job)
         return job['id']
+
+
+def get_job(ident):
+    if not isinstance(ident, str) or not re.fullmatch('[a-f0-9]{32}', ident):
+        raise ValueError('source_missing')
+    job = read('jobs/' + ident + '/job.json', {})
+    if not job or not (STATE / 'jobs' / ident / 'source.pdf').is_file():
+        raise ValueError('source_missing')
+    return job
+
+
+def validate_settings(job, options):
+    if not isinstance(options, dict):
+        raise ValueError('invalid_request')
+    first, last = options.get('first', 1), options.get('last', job['pages'])
+    copies, mode = options.get('copies', 1), options.get('mode', job.get('mode', 'duplex'))
+    if type(first) is not int or type(last) is not int or not 1 <= first <= last <= job['pages']:
+        raise ValueError('invalid_range')
+    if type(copies) is not int or not 1 <= copies <= 10 or mode not in ('single', 'duplex'):
+        raise ValueError('invalid_settings')
+    return first, last, copies, mode
+
+
+def apply_settings(job, options):
+    if not job:
+        raise ValueError('busy')
+    first, last, copies, mode = validate_settings(job, options)
+    queued = read('queue.json', [])
+    if len(queued) + copies - 1 > 30:
+        raise ValueError('queue_full')
+    directory = STATE / 'jobs' / job['id']
+    if first != 1 or last != job['pages']:
+        temporary = directory / 'selected.pdf'
+        pdf_command('--extract', job['source'], temporary, first, last)
+        os.replace(temporary, job['source'])
+        for preview in directory.glob('page-*.png'):
+            preview.unlink()
+    job.update(mode=mode, pages=last-first+1, sheets=last-first+1 if mode == 'single' else (last-first+2)//2)
+    if copies > 1:
+        job.update(copy_index=1, copy_total=copies)
+        extra = []
+        for copy in range(2, copies + 1):
+            other = new_job(job['source'], job['name'], mode=mode)
+            other.update(copy_index=copy, copy_total=copies)
+            write('jobs/' + other['id'] + '/job.json', other)
+            extra.append(other['id'])
+        write('queue.json', extra + queued)
+    write('active.json', job)
+    write('jobs/' + job['id'] + '/job.json', job)
+
+
+def library():
+    with locked():
+        queue = read('queue.json', [])
+        jobs = []
+        for ident in queue:
+            try:
+                job = get_job(ident)
+                jobs.append({k: job[k] for k in ('id', 'name', 'pages', 'sheets', 'mode', 'copy_index', 'copy_total') if k in job})
+            except ValueError:
+                continue
+        cached = []
+        active_id = active_job().get('id')
+        for directory in (STATE / 'jobs').iterdir():
+            if not directory.is_dir() or not re.fullmatch('[a-f0-9]{32}', directory.name):
+                continue
+            files = [f for f in directory.iterdir() if f.suffix in ('.pdf', '.png') and f.is_file()]
+            if not files:
+                continue
+            job = read('jobs/' + directory.name + '/job.json', {})
+            if job:
+                cached.append({'id': directory.name, 'name': job['name'], 'bytes': sum(f.stat().st_size for f in files),
+                               'protected': directory.name in queue or directory.name == active_id})
+        return {'queue': jobs, 'cache': cached, 'bytes': sum(j['bytes'] for j in cached)}
+
+
+def start_draft(data):
+    with locked():
+        if active_job():
+            raise ValueError('busy')
+        ident = data.get('id')
+        queue = read('queue.json', [])
+        if ident not in queue:
+            raise ValueError('stale')
+        job = get_job(ident)
+        launch_job(job)
+        write('queue.json', [i for i in queue if i != ident])
+        return ident
+
+
+def remove_draft(data):
+    with locked():
+        queue = read('queue.json', [])
+        if data.get('id') not in queue:
+            raise ValueError('stale')
+        write('queue.json', [i for i in queue if i != data['id']])
+
+
+def discard_cache(data):
+    # Move generated cached artifacts to the user's Trash; history is retained.
+    with locked():
+        ident = data.get('id')
+        job = get_job(ident)
+        if ident == active_job().get('id') or ident in read('queue.json', []):
+            raise ValueError('busy')
+        target = Path.home() / '.Trash' / ('HP117w-' + ident + '-' + str(int(time.time())))
+        target.mkdir(parents=True, exist_ok=False)
+        for item in (STATE / 'jobs' / ident).iterdir():
+            if item.suffix in ('.pdf', '.png') and item.is_file():
+                shutil.move(str(item), target / item.name)
+
+
+def recover(data):
+    with locked():
+        job = active_job()
+        if not job or not job.get('interrupted') or owner_alive(job):
+            raise ValueError('stale')
+        if job.get('queue') and command(['/usr/bin/lpstat', '-W', 'not-completed', '-o', job['queue']]):
+            raise ValueError('printer_busy')
+        action = data.get('action')
+        if action not in ('restart', 'discard'):
+            raise ValueError('invalid_request')
+        with db() as conn:
+            conn.execute('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?,?,?)', (
+                job['id'], dt.datetime.now().astimezone().isoformat(timespec='seconds'),job['name'],
+                job['pages'],job['sheets'],job.get('printer',''),'Interrupted; completion unconfirmed', ''))
+        if action == 'restart':
+            fresh = new_job(job['source'], job['name'], mode=job['mode'])
+            write('queue.json', [fresh['id']] + read('queue.json', []))
+        write('active.json', {})
+        write('prompt.json', {'id':secrets.token_hex(16),'key':'idle','stage':'ready','message':'','buttons':[]})
+
+
+def preview_file(endpoint):
+    match = re.fullmatch(r'(pdf|preview)/([a-f0-9]{32})(?:/([1-9][0-9]*)\.png)?', endpoint)
+    if not match:
+        raise ValueError('source_missing')
+    with locked():
+        job = get_job(match[2])
+        if match[1] == 'pdf' and match[3] is None:
+            return Path(job['source']).read_bytes(), 'application/pdf'
+        if match[1] != 'preview' or match[3] is None or int(match[3]) > job['pages']:
+            raise ValueError('invalid_range')
+        target = STATE / 'jobs' / job['id'] / ('page-' + match[3] + '.png')
+        if not target.exists():
+            pdf_command('--thumbnail', job['source'], target, match[3])
+        return target.read_bytes(), 'image/png'
 
 
 def serve(token):
@@ -361,14 +543,23 @@ def serve(token):
             if endpoint == 'state':
                 return self.respond(200, state())
             if endpoint == 'history':
-                return self.respond(200, history())
+                params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                return self.respond(200, history(params.get('q', [''])[0], params.get('status', ['all'])[0]))
+            if endpoint == 'library':
+                return self.respond(200, library())
+            if endpoint.startswith(('pdf/', 'preview/')):
+                try:
+                    content, kind = preview_file(endpoint)
+                    return self.respond(200, content, kind)
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    return self.respond(404, {})
             return self.respond(404, {})
         def do_POST(self):
             prefix = '/' + token + '/'
             if not self.path.startswith(prefix):
                 return self.respond(404, {})
             endpoint = self.path[len(prefix):]
-            if endpoint not in ('answer', 'upload', 'reprint'):
+            if endpoint not in ('answer', 'upload', 'reprint', 'queue/start', 'queue/remove', 'cache/discard', 'recover'):
                 return self.respond(404, {})
             origin = self.headers.get('Origin')
             if origin and origin != 'http://' + self.headers.get('Host', ''):
@@ -386,10 +577,13 @@ def serve(token):
                     if self.headers.get_content_type() != 'application/pdf':
                         raise ValueError('invalid_pdf')
                     name = urllib.parse.unquote(self.headers.get('X-Filename', 'Uploaded.pdf'))
-                    return self.respond(202, {'id': upload_pdf(body, name)})
+                    return self.respond(202, {'id': upload_pdf(body, name, draft=True)})
                 data = json.loads(body)
                 if not isinstance(data, dict):
                     raise ValueError('invalid_request')
+                actions = {'queue/start': start_draft, 'queue/remove': remove_draft, 'cache/discard': discard_cache, 'recover': recover}
+                if endpoint in actions:
+                    return self.respond(200, {'id': actions[endpoint](data)})
                 if endpoint == 'reprint':
                     return self.respond(202, {'id': reprint(data)})
                 if not isinstance(data.get('note', ''), str) or len(data.get('note', '')) > 4000:
@@ -422,7 +616,7 @@ def start(token):
         try:
             url = 'http://127.0.0.1:%d/%s/state' % (PORT, token)
             with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=1) as response:
-                return response.status == 200 and json.load(response).get('version') == 2
+                return response.status == 200 and json.load(response).get('version') == 3
         except Exception:
             return False
     if not ready():
@@ -455,6 +649,9 @@ def main():
         print(start(token))
     elif cmd == 'begin':
         print(begin(*args))
+    elif cmd == 'mode':
+        with locked():
+            print(active_job()['mode'])
     elif cmd == 'source':
         with locked():
             print(active_job()['source'])

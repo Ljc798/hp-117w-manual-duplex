@@ -107,6 +107,55 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(mobile, 'command', side_effect=pending):
             self.assertEqual(mobile.wait_queue('queue', 'back_wait'), 'Cancel')
 
+    def test_draft_uploads_queue_without_starting_app(self):
+        with patch.object(mobile, 'open_app') as launch:
+            a = mobile.upload_pdf(self.pdf.read_bytes(), 'A.pdf', draft=True)
+            b = mobile.upload_pdf(self.pdf.read_bytes(), 'B.pdf', draft=True)
+            launch.assert_not_called()
+            self.assertFalse(mobile.active_job())
+            self.assertEqual([j['id'] for j in mobile.library()['queue']], [a, b])
+            mobile.start_draft({'id': a})
+            self.assertEqual(launch.call_count, 1)
+            with self.assertRaisesRegex(ValueError, 'busy'):
+                mobile.start_draft({'id': b})
+
+    def test_queued_pdf_cannot_be_trashed(self):
+        ident = mobile.upload_pdf(self.pdf.read_bytes(), 'queued.pdf', draft=True)
+        with self.assertRaisesRegex(ValueError, 'busy'):
+            mobile.discard_cache({'id': ident})
+        self.assertTrue(Path(mobile.get_job(ident)['source']).exists())
+
+    def test_interrupted_session_recovery_requires_dead_owner_and_empty_queue(self):
+        mobile.begin(self.pdf, 'queue', 'Printer')
+        job=mobile.active_job();job.update(owner_pid=999999,phase='reload');mobile.write('active.json',job)
+        with patch.object(mobile, 'owner_alive', return_value=False):
+            self.assertEqual(mobile.state()['key'],'recovery')
+            with patch.object(mobile, 'command', return_value='queue-1 pending'):
+                with self.assertRaisesRegex(ValueError,'printer_busy'):
+                    mobile.recover({'action':'restart'})
+            with patch.object(mobile, 'command', return_value=''):
+                mobile.recover({'action':'restart'})
+            self.assertFalse(mobile.active_job())
+        self.assertEqual(len(mobile.library()['queue']),1)
+        self.assertEqual(mobile.history()[0]['status'],'Interrupted; completion unconfirmed')
+
+    def test_search_and_partial_filter(self):
+        mobile.begin(self.pdf,'queue','Printer')
+        mobile.record('test.pdf',7,4,'Partial: first side only','Find this note')
+        self.assertEqual(len(mobile.history('Find this note','partial')),1)
+        self.assertEqual(mobile.history('Find this note','printed'),[])
+
+    def test_cache_moves_to_trash_and_keeps_history(self):
+        mobile.begin(self.pdf,'queue','Printer')
+        job=mobile.active_job();mobile.record('test.pdf',7,4,'Printed','')
+        mobile.write('active.json',{})
+        with patch.object(mobile.Path,'home',return_value=mobile.STATE/'fake-home'):
+            mobile.discard_cache({'id':job['id']})
+        self.assertFalse(Path(job['source']).exists())
+        self.assertTrue(list((mobile.STATE/'fake-home/.Trash').rglob('source.pdf')))
+        self.assertEqual(mobile.history()[0]['status'],'Printed')
+        self.assertFalse(mobile.history()[0]['can_reprint'])
+
 
 class HTTPTests(unittest.TestCase):
     @classmethod
@@ -138,7 +187,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn('中文'.encode(), page)
         self.assertIn(b'localStorage', page)
-        self.assertEqual(json.loads(self.request('state')[1])['version'], 2)
+        self.assertEqual(json.loads(self.request('state')[1])['version'], 3)
     def test_wrong_token_and_cross_origin_rejected(self):
         self.assertEqual(self.request('../wrong/state')[0], 404)
         payload = json.dumps({'id': 'x', 'button': 'Continue'}).encode()
@@ -179,6 +228,14 @@ class PDFKitTests(unittest.TestCase):
                 self.assertEqual((job['id'], job['mode'], job['pages'], job['sheets']), (new_id, 'single', 2, 2))
                 self.assertEqual([p['text'] for p in inspect(Path(job['source']))], ['Page 3', 'Page 4'])
                 self.assertEqual(mobile.begin(job['source'], 'queue', 'Printer'), 'single')
+                mobile.apply_settings(mobile.active_job(), {'first':1,'last':2,'copies':3,'mode':'duplex'})
+                self.assertEqual(len(mobile.read('queue.json')),2)
+                self.assertEqual(mobile.active_job()['copy_total'],3)
+                for ident in mobile.read('queue.json'):
+                    self.assertEqual(mobile.get_job(ident)['pages'],2)
+                preview,kind=mobile.preview_file('preview/'+job['id']+'/1.png')
+                self.assertEqual(kind,'image/png')
+                self.assertTrue(preview.startswith(b'\x89PNG\r\n\x1a\n'))
             finally:
                 mobile.STATE = previous
 
