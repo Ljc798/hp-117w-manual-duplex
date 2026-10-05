@@ -56,6 +56,14 @@ function run(args) {
         if(!rep.representationUsingTypeProperties($.NSPNGFileType,$.NSDictionary.dictionary).writeToFileAtomically(args[2],true)) throw Error('QR generation failed');
         return 'OK';
     }
+    if(args[0]==='--extract') {
+        var src=openDocument(args[1]), first=Number(args[3]), last=Number(args[4]);
+        if(Math.floor(first)!==first || Math.floor(last)!==last || first<1 || last<first || last>Number(src.pageCount)) throw Error('Invalid page range');
+        var out=$.PDFDocument.alloc.init;
+        for(var i=first-1;i<last;i++) out.insertPageAtIndex(src.pageAtIndex(i).copy,out.pageCount);
+        if(!out.writeToFile(args[2])) throw Error('Could not extract PDF pages');
+        return String(Number(out.pageCount));
+    }
     if(args[0]==='--parse-range') {
         var parsed=parsePrintRange(args[1],Number(args[2]));
         return parsed ? String(parsed.first)+'|'+String(parsed.last) : 'unknown';

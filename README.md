@@ -1,15 +1,3 @@
-## iPhone 手机控制（新增）
-
-从原来的 PDF → HP 117w Manual Duplex 入口发送文件，Mac 会打开控制网页。iPhone 和 Mac 连接同一个 Wi-Fi，用相机扫描网页上的二维码。第一次连接后，在 Safari 选择“分享 → 添加到主屏幕”。链接和控制口令固定，以后直接点击主屏幕图标，不需要每次扫码；打开着的页面会自动跟随当前任务更新。正面打印、回纸后继续、备注和完成确认都可以在手机操作。也可以直接在 Mac 网页操作。
-
-- Mac 必须保持开机；任务期间脚本通过 caffeinate 阻止空闲睡眠，合盖仍可能休眠。
-- 若 macOS 提示本地网络访问，请允许；手机连不上时检查“系统设置 → 隐私与安全性 → 本地网络”及当前 VPN 的局域网设置。
-- 链接含随机控制口令，只分享给需要操作打印的人。网页仅监听本机回环与 en0/en1 局域网地址，端口 8717，不需公网部署。
-- 安装会保留已安装版本的打印机配置，并备份旧应用。需要 Python 3，安装时记录解释器路径。
-- 不会自动打印：必须点击开始正面；背面还需点击确认回纸。重复点击、旧页面提交不会重复执行。
-- 取消只停止后续步骤，已提交的打印任务由 macOS 打印中心管理。
-- 控制服务按需启动，链接可收藏；网络地址变化后退出旧服务再重新打开工作流。
-
 # HP 117w Manual Duplex
 
 [简体中文](#简体中文) | [English](#english)
@@ -17,6 +5,21 @@
 ## 简体中文
 
 一个 macOS PDF 服务，用于没有自动双面器的打印机。它将 PDF 拆成正反两次单面打印，并在两次打印之间提示重新放纸。
+
+### 手机控制
+
+首次连接后，在 Safari 选择“分享 → 添加到主屏幕”。以后打开固定图标即可，无需重新扫码；Mac 与手机需在同一 Wi-Fi。界面支持中文 / English 切换并记住选择。
+
+- 自动检查打印队列，正面结束后提示回纸，背面结束后请确认所有页实际打印成功。
+- 步骤显示、纸叠方向示意和奇数页提醒。示意图只表示保持纸叠方向，具体进纸朝向沿用本机测试成功的方法。
+- 可开启声音提醒（页面在前台时），用于提醒放纸或检查结果。
+- 手机上传允许打印的 PDF（最大 50 MB），确认后才开始打印。
+- 手机查看打印历史；首次自动读取原有 Excel 日志，新增记录同时写入本机手机历史和原 Excel 日志。
+- 从历史记录选择页码范围补打，支持手动双面或单面；必须使用新白纸。页码对应该记录保存的 PDF，选定范围的第一页会作为新的双面序列起点。
+- PDF 保存在 `~/Library/Application Support/HP117wMobile/jobs` 供补打使用，打印历史保存在同目录的 SQLite 文件。旧 Excel 记录没有缓存 PDF，只能查看，不能直接补打。
+- 服务使用固定口令链接，监听本机与 en0/en1 局域网接口的 8717 端口。链接只交给需要控制打印的人。
+- 安装会写入登录启动项 `~/Library/LaunchAgents/local.hp117w.mobile.plist`，登录后即可从手机上传。首次安装可运行 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hp117w.mobile.plist`，或重新登录 Mac。
+- Mac 需保持开机；打印任务期间防止空闲睡眠，合盖仍可能休眠。若网络地址改变，重启控制服务。
 
 ### 功能
 
@@ -47,7 +50,7 @@
 
 ### 限制
 
-- A4、黑白、单份、每页一面为固定设置。
+- A4、黑白、单份、每页一面为固定设置。手机补打可以选择单面模式。
 - 页数是 PDF 服务交来的 PDF 页数；日志不包含源文件里的原始页码范围。
 - 备注在打印结束后出现。
 - `install.sh` 会将旧应用备份到相邻的 `.backup.<时间>` 路径。
@@ -55,6 +58,20 @@
 ## English
 
 A macOS PDF Service for printers without an automatic duplexer. It prepares the PDF for two single-sided passes and prompts you to reload the paper between them.
+
+### Phone controls
+
+In Safari, choose **Share → Add to Home Screen** once. Reuse the saved icon for every session; no repeated QR scan. Keep your iPhone and Mac on the same Wi-Fi. The interface supports **中文 / English** and remembers your choice.
+
+- Automatic queue checks, a four-step guide, a stack-orientation diagram, and an odd-page reminder. Follow your previously tested paper reload orientation; the diagram only illustrates preserving it.
+- Optional sound when the page is in the foreground. Queue disappearance does not prove physical success: confirm that all sheets printed before completing a session.
+- Upload an unlocked, printable PDF up to 50 MB from your phone. Nothing prints until you confirm.
+- Browse history, including a one-time read-only import of the existing Excel log. New records go to local phone history and the existing Excel workflow.
+- Reprint a selected range on **fresh blank paper**, either manual duplex or single-sided. Page numbers refer to the saved PDF for that record. A selected range starts a new duplex sequence.
+- Saved PDFs live in `~/Library/Application Support/HP117wMobile/jobs`; local history uses SQLite beside it. Old Excel entries without a cached PDF are view-only.
+- The fixed link contains a private control token. The service listens on loopback and en0/en1 LAN interfaces, port 8717. Share the link only with people who should control the printer.
+- The installer adds `~/Library/LaunchAgents/local.hp117w.mobile.plist` for startup at login. Activate it once with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hp117w.mobile.plist` or log in again.
+- Keep the Mac awake; the workflow prevents idle sleep while printing, but closing the lid can still suspend it. Restart the service after network address changes.
 
 ### Features
 
@@ -85,7 +102,15 @@ This repository is configured for the HP Laser MFP 117w queue and its manual pap
 
 ### Limitations
 
-- A4, black and white, one copy, and one page per side are fixed settings.
+- A4, black and white, one copy, and one page per side are fixed settings. Phone reprints can also use single-sided mode.
 - The page count is for the PDF received by the service; the log does not include the original document page range.
 - The optional note prompt appears after printing.
 - `install.sh` backs up an existing app beside it as `.backup.<timestamp>`.
+
+## Validation
+
+```sh
+HP117W_PDFKIT_TEST=1 python3 -m unittest discover -s tests -v
+```
+
+Tests use temporary PDFs and mocked job submissions. They cover duplicate/stale actions, busy-session isolation, PDF range validation, automatic queue monitoring, and real PDFKit front/back ordering and rotation. They do not send print jobs to the physical printer.

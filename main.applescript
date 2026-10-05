@@ -4,6 +4,7 @@ property queueName : "REPLACE_WITH_YOUR_CUPS_QUEUE_NAME"
 property titleText : "HP 117w Manual Duplex"
 property printerLabel : "Your Printer Name"
 property mobilePython : "/opt/homebrew/bin/python3"
+property currentMode : "duplex"
 property logFileName : "HP 117w Manual Duplex Print Log.xlsx"
 
 on run argv
@@ -41,13 +42,17 @@ on pendingJobs()
 	return «event sysoexec» "/usr/bin/lpstat -W not-completed -o " & quoted form of queueName
 end pendingJobs
 
+on waitForQueue(stageName)
+	set helperPath to POSIX path of (path to resource "mobile.py")
+	set replyText to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " wait " & quoted form of queueName & " " & quoted form of stageName
+	if replyText is "Cancel" then error number -128
+end waitForQueue
+
 on waitForFinalPass(waitMessage)
-	set pendingText to my pendingJobs()
-	repeat while pendingText is not ""
-        my mobileAsk(waitMessage, "plain", {"Check Again"})
-		set pendingText to my pendingJobs()
-		set waitMessage to "Print Center still shows an unfinished job. Wait until all pages have printed, then click Check Again."
-	end repeat
+	my waitForQueue("back_wait")
+	set resultText to my mobileAsk(waitMessage, "plain", {"Confirm Printed", "Report Problem", "Cancel"})
+	if paragraph 1 of resultText is "Cancel" then error number -128
+	if paragraph 1 of resultText is "Report Problem" then error "Some pages did not print successfully. Use Print history on your phone to reprint the missing pages on fresh paper."
 	return true
 end waitForFinalPass
 
@@ -61,6 +66,8 @@ on printLogPath()
 end printLogPath
 
 on appendPrintLog(pdfName, pageCount, sheetCount, statusText, noteText)
+	set helperPath to POSIX path of (path to resource "mobile.py")
+	do shell script quoted form of mobilePython & " " & quoted form of helperPath & " record " & quoted form of pdfName & " " & pageCount & " " & sheetCount & " " & quoted form of statusText & " " & quoted form of noteText
 	set logPath to my printLogPath()
 	set excelWasRunning to false
 	try
@@ -117,17 +124,22 @@ on appendPrintLog(pdfName, pageCount, sheetCount, statusText, noteText)
 end appendPrintLog
 
 on processPDFs(theFiles, optionsText)
+	if (count of theFiles) is not 1 then error "Choose one PDF at a time."
 	set helperPath to POSIX path of (path to resource "mobile.py")
-	set mobileURL to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " start"
-	open location mobileURL
-	set keepAwakePID to do shell script "/usr/bin/caffeinate -i >/dev/null 2>&1 & echo $!"
+	set keepAwakePID to ""
+	set sourcePath to POSIX path of (item 1 of theFiles)
+	set currentMode to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " begin " & quoted form of sourcePath & " " & quoted form of queueName & " " & quoted form of printerLabel
 	try
+		set mobileURL to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " start"
+		open location mobileURL
+		set keepAwakePID to do shell script "/usr/bin/caffeinate -i >/dev/null 2>&1 & echo $!"
 		my processMobilePDFs(theFiles, optionsText)
 	on error errorText number errorNumber
-		do shell script "/bin/kill " & keepAwakePID & " >/dev/null 2>&1 || true"
+		if keepAwakePID is not "" then do shell script "/bin/kill " & keepAwakePID & " >/dev/null 2>&1 || true"
+		do shell script quoted form of mobilePython & " " & quoted form of helperPath & " finish"
 		error errorText number errorNumber
 	end try
-	do shell script "/bin/kill " & keepAwakePID & " >/dev/null 2>&1 || true"
+	if keepAwakePID is not "" then do shell script "/bin/kill " & keepAwakePID & " >/dev/null 2>&1 || true"
 	do shell script quoted form of mobilePython & " " & quoted form of helperPath & " finish"
 end processPDFs
 
@@ -152,13 +164,16 @@ on processMobilePDFs(theFiles, optionsText)
 	try
 		if (count of theFiles) is not 1 then error "Choose one PDF at a time."
 		set workerPath to POSIX path of («event sysorpth» "duplex.js")
-		set pdfPath to POSIX path of (item 1 of theFiles)
-		set pdfName to name of («event sysonfo4» (item 1 of theFiles))
+		set helperPath to POSIX path of (path to resource "mobile.py")
+		set pdfPath to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " source"
+		set helperPath to POSIX path of (path to resource "mobile.py")
+		set pdfName to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " name"
 		if pdfName ends with ".pdf.pdf" then set pdfName to text 1 thru ((count of pdfName) - 4) of pdfName
 		set tempDir to «event sysoexec» "/usr/bin/mktemp -d -t hp117w-duplex"
 		set pageCount to («event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --count " & quoted form of pdfPath) as integer
 		set sheetCount to (pageCount + 1) div 2
-		set oddCount to (pageCount mod 2 is 1) and pageCount > 1
+		if currentMode is "single" then set sheetCount to pageCount
+		set oddCount to (pageCount mod 2 is 1) and pageCount > 1 and currentMode is not "single"
 		set prepareResult to «event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --prepare " & quoted form of pdfPath & " " & quoted form of tempDir & " 1 " & (pageCount as text)
 		set firstPassDescription to "First: every other page of the supplied PDF, in ascending order."
 		set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1–" & pageCount & "." & return & "A4, black and white, one copy, one page per side." & return & return & pageCount & " pages / " & sheetCount & " sheets." & return & firstPassDescription & return & "Pause: reload and tap Continue on your iPhone." & return & "Last: remaining pages in reverse order, rotated 180 degrees."
@@ -168,22 +183,27 @@ on processMobilePDFs(theFiles, optionsText)
 		my askUser(intro, "Print First Side")
 		if my pendingJobs() is not "" then error "The printer has unfinished jobs. Wait for them to finish and start this helper again. This helper has not printed anything."
 		set firstAttempted to true
-		my printPDF(tempDir & "/odd.pdf", "HP117w manual duplex - odd pages")
+		if currentMode is "single" then
+			my printPDF(pdfPath, "HP117w reprint - single-sided pages")
+		else
+			my printPDF(tempDir & "/odd.pdf", "HP117w manual duplex - odd pages")
+		end if
 		set firstSubmitted to true
-		if pageCount > 1 then
+		if pageCount > 1 and currentMode is not "single" then
+			my waitForQueue("front_wait")
 			set reloadText to "Wait until all " & sheetCount & " front-side sheets have completely printed." & return & return
 			if oddCount then set reloadText to reloadText & "Odd number of pages: set aside the last sheet and leave its back blank." & return & return
 			set reloadText to reloadText & "Reload the printed stack using your previously tested method: do not flip, rotate, or rearrange it. Place no unused sheets ahead of it." & return & return & "Continue only after every front side has printed successfully and the stack is reloaded. Back sides will print in reverse order, rotated 180 degrees." & return & return & "If the first pass failed or was cancelled, tap Cancel remaining steps."
 			repeat
 				my askUser(reloadText, "Continue")
 				if my pendingJobs() is "" then exit repeat
-				my askUser("Print Center still shows unfinished jobs. Wait until the printer finishes.", "Check Again")
+				my waitForQueue("front_wait")
 			end repeat
 			set secondAttempted to true
 			my printPDF(tempDir & "/even.pdf", "HP117w manual duplex - even pages")
 			set secondSubmitted to true
 		end if
-		if pageCount is 1 then
+		if pageCount is 1 or currentMode is "single" then
 			set finalPassMessage to "Wait until the single page has completely printed. The print log note will appear afterward."
 		else
 			set finalPassMessage to "Wait until all " & sheetCount & " final-side sheets have completely printed. The print log note will appear afterward."
@@ -206,9 +226,9 @@ on processMobilePDFs(theFiles, optionsText)
 				set printStatus to "Both sides submitted; completion unconfirmed"
 			else if secondAttempted then
 				set printStatus to "Partial: second side not confirmed"
-			else if firstSubmitted and pageCount is 1 and finalPassFinished then
+			else if firstSubmitted and (pageCount is 1 or currentMode is "single") and finalPassFinished then
 				set printStatus to "Printed"
-			else if firstSubmitted and pageCount is 1 then
+			else if firstSubmitted and (pageCount is 1 or currentMode is "single") then
 				set printStatus to "Single side submitted; completion unconfirmed"
 			else if firstSubmitted then
 				set printStatus to "Partial: first side only"

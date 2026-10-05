@@ -29,6 +29,7 @@ source=re.sub(r'property mobilePython : "[^"\n]*"','property mobilePython : "'+s
 pathlib.Path(sys.argv[2]).write_text(source)
 PYCODE
 /usr/bin/osacompile -o "$NEW_APP" "$BUILD/main.applescript"
+cp "$ROOT/mobile.html" "$NEW_APP/Contents/Resources/mobile.html"
 cp "$ROOT/mobile.py" "$NEW_APP/Contents/Resources/mobile.py"
 cp "$ROOT/duplex.js" "$NEW_APP/Contents/Resources/duplex.js"
 cp "$ROOT/Info.plist" "$NEW_APP/Contents/Info.plist"
@@ -41,6 +42,23 @@ fi
 mv "$NEW_APP" "$APP"
 cp "$ROOT/pdf-service/HP 117w Manual Duplex" "$SERVICE"
 chmod 755 "$SERVICE"
+
+# Start the local phone service at login so phone uploads work after a reboot.
+"$PYTHON" - "$APP" "$PYTHON" <<'PYAGENT'
+import pathlib,plistlib,sys
+base=pathlib.Path.home()
+agent=base/'Library/LaunchAgents/local.hp117w.mobile.plist'
+agent.parent.mkdir(parents=True,exist_ok=True)
+state=base/'Library/Application Support/HP117wMobile'
+state.mkdir(parents=True,exist_ok=True,mode=0o700)
+agent.write_bytes(plistlib.dumps({
+    'Label':'local.hp117w.mobile',
+    'ProgramArguments':[sys.argv[2],sys.argv[1]+'/Contents/Resources/mobile.py','serve'],
+    'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':10,
+    'StandardOutPath':str(state/'server.log'),'StandardErrorPath':str(state/'server.log'),
+    'LimitLoadToSessionType':'Aqua'
+}))
+PYAGENT
 
 if [ ! -f "$HOME/Documents/HP 117w Manual Duplex Print Log.xlsx" ]; then
   echo "Create an Excel workbook named HP 117w Manual Duplex Print Log.xlsx in Documents."
