@@ -3,3 +3,5 @@
 *.pdf
 *.log
 *.scpt
+__pycache__/
+*.pyc

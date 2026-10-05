@@ -3,6 +3,7 @@ use scripting additions
 property queueName : "REPLACE_WITH_YOUR_CUPS_QUEUE_NAME"
 property titleText : "HP 117w Manual Duplex"
 property printerLabel : "Your Printer Name"
+property mobilePython : "/opt/homebrew/bin/python3"
 property logFileName : "HP 117w Manual Duplex Print Log.xlsx"
 
 on run argv
@@ -14,21 +15,26 @@ on open theFiles
 	my processPDFs(theFiles, "")
 end open
 
+on mobileAsk(messageText, noteMode, buttonNames)
+	set helperPath to POSIX path of (path to resource "mobile.py")
+	set commandText to quoted form of mobilePython & " " & quoted form of helperPath & " ask " & quoted form of messageText & " " & quoted form of noteMode
+	repeat with buttonName in buttonNames
+		set commandText to commandText & " " & quoted form of (buttonName as text)
+	end repeat
+	return do shell script commandText
+end mobileAsk
+
 on askUser(messageText, buttonText)
-	activate
-	«event sysodisA» titleText given «class mesS»:messageText, «class as A»:«constant EAlTinfA», «class btns»:{"Cancel", buttonText}, «class dflt»:buttonText, «class cbtn»:"Cancel"
+	set replyText to my mobileAsk(messageText, "plain", {"Cancel", buttonText})
+	if paragraph 1 of replyText is "Cancel" then error number -128
 end askUser
 
 on askForNote(pdfName)
-	activate
-	try
-		set dialogResult to «event sysodlog» ("Optional note for " & pdfName & ":") given «class dtxt»:"", «class appr»:titleText, «class btns»:{"Skip Note", "Save Record"}, «class dflt»:"Save Record"
-		if «class bhit» of dialogResult is "Skip Note" then return ""
-		return «class ttxt» of dialogResult
-	on error errorText number errorNumber
-		if errorNumber is -128 then return ""
-		error errorText number errorNumber
-	end try
+	set replyText to my mobileAsk("Add an optional note for this print:" & return & pdfName, "note", {"Skip Note", "Save Record"})
+	if paragraph 1 of replyText is "Skip Note" then return ""
+	if (count of paragraphs of replyText) < 2 then return ""
+	set firstBreak to offset of return in replyText
+	return text (firstBreak + 1) thru -1 of replyText
 end askForNote
 
 on pendingJobs()
@@ -38,11 +44,7 @@ end pendingJobs
 on waitForFinalPass(waitMessage)
 	set pendingText to my pendingJobs()
 	repeat while pendingText is not ""
-		try
-			«event sysodisA» titleText given «class mesS»:waitMessage, «class as A»:«constant EAlTinfA», «class btns»:{"Check Again"}, «class dflt»:"Check Again"
-		on error errorText number errorNumber
-			if errorNumber is not -128 then error errorText number errorNumber
-		end try
+        my mobileAsk(waitMessage, "plain", {"Check Again"})
 		set pendingText to my pendingJobs()
 		set waitMessage to "Print Center still shows an unfinished job. Wait until all pages have printed, then click Check Again."
 	end repeat
@@ -115,6 +117,21 @@ on appendPrintLog(pdfName, pageCount, sheetCount, statusText, noteText)
 end appendPrintLog
 
 on processPDFs(theFiles, optionsText)
+	set helperPath to POSIX path of (path to resource "mobile.py")
+	set mobileURL to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " start"
+	open location mobileURL
+	set keepAwakePID to do shell script "/usr/bin/caffeinate -i >/dev/null 2>&1 & echo $!"
+	try
+		my processMobilePDFs(theFiles, optionsText)
+	on error errorText number errorNumber
+		do shell script "/bin/kill " & keepAwakePID & " >/dev/null 2>&1 || true"
+		error errorText number errorNumber
+	end try
+	do shell script "/bin/kill " & keepAwakePID & " >/dev/null 2>&1 || true"
+	do shell script quoted form of mobilePython & " " & quoted form of helperPath & " finish"
+end processPDFs
+
+on processMobilePDFs(theFiles, optionsText)
 	set tempDir to ""
 	set firstAttempted to false
 	set firstSubmitted to false
@@ -144,7 +161,7 @@ on processPDFs(theFiles, optionsText)
 		set oddCount to (pageCount mod 2 is 1) and pageCount > 1
 		set prepareResult to «event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --prepare " & quoted form of pdfPath & " " & quoted form of tempDir & " 1 " & (pageCount as text)
 		set firstPassDescription to "First: every other page of the supplied PDF, in ascending order."
-		set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1–" & pageCount & "." & return & "A4, black and white, one copy, one page per side." & return & return & pageCount & " pages / " & sheetCount & " sheets." & return & firstPassDescription & return & "Pause: reload and click Continue on this Mac." & return & "Last: remaining pages in reverse order, rotated 180 degrees."
+		set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1–" & pageCount & "." & return & "A4, black and white, one copy, one page per side." & return & return & pageCount & " pages / " & sheetCount & " sheets." & return & firstPassDescription & return & "Pause: reload and tap Continue on your iPhone." & return & "Last: remaining pages in reverse order, rotated 180 degrees."
 		if oddCount then set intro to intro & return & return & "Odd number of pages: set aside the last sheet before reloading. Its back stays blank."
 		if pageCount is 1 then set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1." & return & "A4, black and white, one copy." & return & return & "Only one side will print."
 		set intro to intro & return & return & "Nothing prints until you click Print First Side."
@@ -154,9 +171,9 @@ on processPDFs(theFiles, optionsText)
 		my printPDF(tempDir & "/odd.pdf", "HP117w manual duplex - odd pages")
 		set firstSubmitted to true
 		if pageCount > 1 then
-			set reloadText to "Wait until all " & sheetCount & " odd-page sheets have completely printed." & return & return
-			if oddCount then set reloadText to reloadText & "Set aside the last sheet; keep its back blank." & return & return
-			set reloadText to reloadText & "Reload the printed stack as in your working preset test: do not flip, rotate, or rearrange it. Place no unused sheets ahead of it." & return & return & "Click Continue only after every first-side page printed successfully and the stack is reloaded. The remaining pages will print in reverse order, rotated 180 degrees." & return & return & "If the first pass failed or was cancelled, click Cancel here."
+			set reloadText to "Wait until all " & sheetCount & " front-side sheets have completely printed." & return & return
+			if oddCount then set reloadText to reloadText & "Odd number of pages: set aside the last sheet and leave its back blank." & return & return
+			set reloadText to reloadText & "Reload the printed stack using your previously tested method: do not flip, rotate, or rearrange it. Place no unused sheets ahead of it." & return & return & "Continue only after every front side has printed successfully and the stack is reloaded. Back sides will print in reverse order, rotated 180 degrees." & return & return & "If the first pass failed or was cancelled, tap Cancel remaining steps."
 			repeat
 				my askUser(reloadText, "Continue")
 				if my pendingJobs() is "" then exit repeat
@@ -238,8 +255,8 @@ on processPDFs(theFiles, optionsText)
 		if logSaved then
 			set completionText to "Print completed and recorded." & return & pdfName & return & return & "Would you like to open the Excel log?" & return & logPath
 			activate
-			set completionChoice to «event sysodlog» completionText given «class appr»:titleText, «class btns»:{"Not Now", "Open Excel"}, «class dflt»:"Not Now"
-			if «class bhit» of completionChoice is "Open Excel" then
+			set completionChoice to my mobileAsk(completionText, "plain", {"Not Now", "Open Excel"})
+			if paragraph 1 of completionChoice is "Open Excel" then
 				try
 					«event sysoexec» "/usr/bin/open " & quoted form of logPath
 				on error openError
@@ -250,4 +267,4 @@ on processPDFs(theFiles, optionsText)
 			my askUser("The print job was submitted, but the record could not be saved." & return & logPath & return & return & logErrorText, "OK")
 		end if
 	end if
-end processPDFs
+end processMobilePDFs

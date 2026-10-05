@@ -14,7 +14,22 @@ if /usr/bin/pgrep -f "^$APP/Contents/MacOS/droplet$" >/dev/null 2>&1; then
 fi
 
 mkdir -p "$HOME/Applications" "$HOME/Library/PDF Services" "$HOME/Documents"
-/usr/bin/osacompile -o "$NEW_APP" "$ROOT/main.applescript"
+PYTHON="$(command -v python3)"
+"$PYTHON" - "$ROOT/main.applescript" "$BUILD/main.applescript" "$APP" "$PYTHON" <<'PYCODE'
+import pathlib,re,subprocess,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+installed=pathlib.Path(sys.argv[3])/'Contents/Resources/Scripts/main.scpt'
+if installed.exists():
+    old=subprocess.check_output(['/usr/bin/osadecompile',str(installed)],text=True)
+    for key,placeholder in [('queueName','REPLACE_WITH_YOUR_CUPS_QUEUE_NAME'),('printerLabel','Your Printer Name')]:
+        match=re.search(r'property '+key+r' : ("[^"\n]*")',old)
+        if match and ('"'+placeholder+'"') in source:
+            source=source.replace('property '+key+' : "'+placeholder+'"','property '+key+' : '+match[1])
+source=re.sub(r'property mobilePython : "[^"\n]*"','property mobilePython : "'+sys.argv[4]+'"',source)
+pathlib.Path(sys.argv[2]).write_text(source)
+PYCODE
+/usr/bin/osacompile -o "$NEW_APP" "$BUILD/main.applescript"
+cp "$ROOT/mobile.py" "$NEW_APP/Contents/Resources/mobile.py"
 cp "$ROOT/duplex.js" "$NEW_APP/Contents/Resources/duplex.js"
 cp "$ROOT/Info.plist" "$NEW_APP/Contents/Info.plist"
 /usr/bin/codesign --force --deep --sign - "$NEW_APP"

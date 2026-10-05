@@ -47,6 +47,15 @@ function parsePrintRange(options, spoolPageCount) {
     return {first:first,last:last};
 }
 function run(args) {
+    if(args[0]==='--qr') {
+        ObjC.import('AppKit'); ObjC.import('CoreImage');
+        var filter=$.CIFilter.filterWithName('CIQRCodeGenerator');
+        filter.setValueForKey($(args[1]).dataUsingEncoding($.NSUTF8StringEncoding),'inputMessage');
+        var ci=filter.outputImage;
+        var rep=$.NSBitmapImageRep.alloc.initWithCIImage(ci);
+        if(!rep.representationUsingTypeProperties($.NSPNGFileType,$.NSDictionary.dictionary).writeToFileAtomically(args[2],true)) throw Error('QR generation failed');
+        return 'OK';
+    }
     if(args[0]==='--parse-range') {
         var parsed=parsePrintRange(args[1],Number(args[2]));
         return parsed ? String(parsed.first)+'|'+String(parsed.last) : 'unknown';
