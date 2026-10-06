@@ -507,6 +507,18 @@ def preview_file(endpoint):
         return target.read_bytes(), 'image/png'
 
 
+def lan_addresses():
+    if os.environ.get('HP117W_TEST'):
+        return set()
+    addresses = set()
+    for interface in ('en0', 'en1'):
+        address = subprocess.run(['/usr/sbin/ipconfig', 'getifaddr', interface],
+                                 capture_output=True, text=True).stdout.strip()
+        if address and address != '127.0.0.1':
+            addresses.add(address)
+    return addresses
+
+
 def serve(token):
     class Server(http.server.ThreadingHTTPServer):
         def server_bind(self):
@@ -596,19 +608,35 @@ def serve(token):
                 return self.respond(409 if reason == 'busy' else 400, {'error': reason})
             except (OSError, subprocess.SubprocessError):
                 return self.respond(500, {'error': 'operation_failed'})
-    servers = [Server(('127.0.0.1', PORT), Handler)]
-    for server in servers:
-        server.daemon_threads = True
-    if not os.environ.get('HP117W_TEST'):
-        for interface in ('en0', 'en1'):
-            address = subprocess.run(['/usr/sbin/ipconfig', 'getifaddr', interface], capture_output=True, text=True).stdout.strip()
-            if address and address not in [s.server_address[0] for s in servers]:
-                servers.append(Server((address, PORT), Handler))
+    loopback = Server(('127.0.0.1', PORT), Handler)
+    loopback.daemon_threads = True
+    lan_servers = {}
+
+    def refresh_listeners():
+        addresses = lan_addresses()
+        for address in list(lan_servers):
+            if address not in addresses:
+                server = lan_servers.pop(address)
+                server.shutdown()
+                server.server_close()
+        for address in addresses - lan_servers.keys():
+            try:
+                server = Server((address, PORT), Handler)
+            except OSError:
+                continue  # Interface may change between discovery and binding; retry.
+            server.daemon_threads = True
+            lan_servers[address] = server
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def watch_network():
+        while True:
+            time.sleep(3)
+            refresh_listeners()
+
+    refresh_listeners()
     write('server.json', {'pid': os.getpid()})
-    for server in servers[1:]:
-        server.daemon_threads = True
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-    servers[0].serve_forever()
+    threading.Thread(target=watch_network, daemon=True).start()
+    loopback.serve_forever()
 
 
 def start(token):
