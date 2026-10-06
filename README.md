@@ -138,3 +138,7 @@ Tests use temporary PDFs and mocked job submissions. They cover duplicate/stale 
 手机控制页面地址固定，新打印任务会将 Mac 上已有的 Chrome 或 Safari 控制标签页切到前台；只有找不到时才打开页面。手机仍可使用已收藏的页面或主屏幕图标。
 
 The mobile control URL stays the same. New print sessions bring an existing Chrome or Safari control tab to the front, opening the page only when no matching tab exists. Your iPhone bookmark or Home Screen shortcut still works.
+
+打印页面包含随阶段变化的出纸动画、按钮反馈与页面过渡。动画仅作状态示意，不表示实际页数；可关闭并记住选择，也遵循系统的减少动态效果设置。
+
+The print page includes stage-aware paper animation, button feedback and page transitions. Animation illustrates status rather than actual page counts. Its toggle is remembered, and system reduced-motion preferences are respected.
