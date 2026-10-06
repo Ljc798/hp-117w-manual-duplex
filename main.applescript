@@ -132,7 +132,6 @@ on processPDFs(theFiles, optionsText)
 	set currentMode to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " begin " & quoted form of sourcePath & " " & quoted form of queueName & " " & quoted form of printerLabel & " " & ownerPID
 	try
 		set mobileURL to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " start"
-		open location mobileURL
 		set keepAwakePID to do shell script "/usr/bin/caffeinate -i >/dev/null 2>&1 & echo $!"
 		my processMobilePDFs(theFiles, optionsText)
 	on error errorText number errorNumber
