@@ -135,6 +135,6 @@ HP117W_PDFKIT_TEST=1 python3 -m unittest discover -s tests -v
 
 Tests use temporary PDFs and mocked job submissions. They cover duplicate/stale actions, busy-session isolation, PDF range validation, automatic queue monitoring, and real PDFKit front/back ordering and rotation. They do not send print jobs to the physical printer.
 
-手机控制页面地址固定，新打印任务不会自动在 Mac 上打开浏览器；请使用已收藏的页面或 iPhone 主屏幕图标。
+手机控制页面地址固定，新打印任务会将 Mac 上已有的 Chrome 或 Safari 控制标签页切到前台；只有找不到时才打开页面。手机仍可使用已收藏的页面或主屏幕图标。
 
-The mobile control URL stays the same. New print sessions do not automatically open a browser on the Mac; use your bookmark or iPhone Home Screen shortcut.
+The mobile control URL stays the same. New print sessions bring an existing Chrome or Safari control tab to the front, opening the page only when no matching tab exists. Your iPhone bookmark or Home Screen shortcut still works.

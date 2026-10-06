@@ -123,6 +123,42 @@ on appendPrintLog(pdfName, pageCount, sheetCount, statusText, noteText)
 	end try
 end appendPrintLog
 
+on showControlPage(mobileURL)
+	if application "Google Chrome" is running then
+		tell application "Google Chrome"
+			repeat with browserWindow in windows
+				set tabNumber to 0
+				repeat with browserTab in tabs of browserWindow
+					set tabNumber to tabNumber + 1
+					if URL of browserTab starts with mobileURL then
+						set active tab index of browserWindow to tabNumber
+						set minimized of browserWindow to false
+						set index of browserWindow to 1
+						activate
+						return
+					end if
+				end repeat
+			end repeat
+		end tell
+	end if
+	if application "Safari" is running then
+		tell application "Safari"
+			repeat with browserWindow in windows
+				repeat with browserTab in tabs of browserWindow
+					if URL of browserTab starts with mobileURL then
+						set current tab of browserWindow to browserTab
+						set miniaturized of browserWindow to false
+						set index of browserWindow to 1
+						activate
+						return
+					end if
+				end repeat
+			end repeat
+		end tell
+	end if
+	open location mobileURL
+end showControlPage
+
 on processPDFs(theFiles, optionsText)
 	if (count of theFiles) is not 1 then error "Choose one PDF at a time."
 	set helperPath to POSIX path of (path to resource "mobile.py")
@@ -132,6 +168,7 @@ on processPDFs(theFiles, optionsText)
 	set currentMode to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " begin " & quoted form of sourcePath & " " & quoted form of queueName & " " & quoted form of printerLabel & " " & ownerPID
 	try
 		set mobileURL to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " start"
+		my showControlPage(mobileURL)
 		set keepAwakePID to do shell script "/usr/bin/caffeinate -i >/dev/null 2>&1 & echo $!"
 		my processMobilePDFs(theFiles, optionsText)
 	on error errorText number errorNumber
