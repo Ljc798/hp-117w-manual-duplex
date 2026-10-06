@@ -230,7 +230,7 @@ def wait_queue(queue, stage):
                 if read('answer.json', {}).get('id') == ident:
                     return 'Cancel'
             return 'Ready'
-        time.sleep(2)
+        time.sleep(.5)
 
 
 def new_job(source, name, queue='', printer='', mode='duplex', ident=None):
