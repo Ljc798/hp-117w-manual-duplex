@@ -30,6 +30,7 @@ pathlib.Path(sys.argv[2]).write_text(source)
 PYCODE
 /usr/bin/osacompile -o "$NEW_APP" "$BUILD/main.applescript"
 cp "$ROOT/mobile.html" "$NEW_APP/Contents/Resources/mobile.html"
+cp "$ROOT/word-to-pdf.applescript" "$NEW_APP/Contents/Resources/word-to-pdf.applescript"
 cp "$ROOT/mobile.py" "$NEW_APP/Contents/Resources/mobile.py"
 cp "$ROOT/duplex.js" "$NEW_APP/Contents/Resources/duplex.js"
 cp "$ROOT/Info.plist" "$NEW_APP/Contents/Info.plist"
@@ -65,6 +66,8 @@ if [ ! -f "$HOME/Documents/HP 117w Manual Duplex Print Log.xlsx" ]; then
   echo "Add a sheet named Print Log with these headers in A1:G1: Printed at, PDF, Pages, Sheets, Printer, Status, Notes."
 fi
 
+"$PYTHON" "$ROOT/install-finder-action.py" "$APP" "$PYTHON"
+/System/Library/CoreServices/pbs -update
 rm -rf "$BUILD"
 echo "Installed app: $APP"
 echo "Installed PDF service: $SERVICE"

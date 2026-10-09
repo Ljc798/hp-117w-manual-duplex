@@ -13,6 +13,7 @@ import socketserver
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -150,7 +151,10 @@ def state():
     with locked():
         job = active_job()
         prompt = read('prompt.json', {'id': 'idle', 'key': 'idle', 'message': '', 'buttons': [], 'stage': 'ready'})
-        prompt['job'] = {k: job[k] for k in ('id', 'name', 'pages', 'sheets', 'printer', 'mode', 'interrupted', 'phase', 'copy_index', 'copy_total') if k in job}
+        prompt['job'] = {k: job[k] for k in ('id', 'name', 'pages', 'sheets', 'back_pages', 'printer', 'mode', 'interrupted', 'phase', 'copy_index', 'copy_total', 'batch', 'batch_count') if k in job}
+        if job.get('batch'):
+            prompt['job']['odd_files'] = ['%s (%s pages)' % (item['name'], item['pages']) for item in job.get('batch_items', [])
+                                          if int(item['pages']) % 2] if job.get('back_pages') else []
         prompt['active'] = bool(job)
         prompt['version'] = 3
         prompt['queued'] = len(read('queue.json', []))
@@ -173,7 +177,7 @@ def answer(data):
         prompt = read('prompt.json', {})
         if data.get('id') != prompt.get('id') or data.get('button') not in prompt.get('buttons', []):
             return False
-        if data.get('button') == 'Print First Side':
+        if data.get('button') == 'Print First Side' and not active_job().get('batch'):
             apply_settings(active_job(), data.get('settings', {}))
         write('prompt.json', {**prompt, 'id': secrets.token_hex(16), 'key': 'processing', 'message': '', 'buttons': []})
         write('answer.json', data)
@@ -208,7 +212,7 @@ def ask(message, note, buttons):
 def wait_queue(queue, stage):
     with locked():
         job = active_job()
-    if stage == 'back_wait' and (job.get('mode') == 'single' or job.get('pages') == 1):
+    if stage == 'back_wait' and (job.get('mode') == 'single' or job.get('back_pages', (job.get('pages', 0) + 1) // 2) == 0):
         stage = 'front_wait'
     ident = publish('', ['Cancel'], 'waiting', stage)
     while True:
@@ -241,8 +245,10 @@ def new_job(source, name, queue='', printer='', mode='duplex', ident=None):
     if Path(source).resolve() != target.resolve():
         shutil.copyfile(source, target)
     count = int(pdf_command('--count', target))
+    name = ''.join(c for c in str(name) if ord(c) >= 32)[:160] or 'PDF'
     job = {'id': ident, 'source': str(target), 'name': name, 'pages': count,
-           'sheets': count if mode == 'single' else (count + 1) // 2, 'mode': mode,
+           'sheets': count if mode == 'single' else (count + 1) // 2,
+           'back_pages': (count + 1) // 2 if mode == 'duplex' else 0, 'mode': mode,
            'queue': queue, 'printer': printer, 'started_at': dt.datetime.now().astimezone().isoformat(timespec='seconds')}
     write('jobs/' + ident + '/job.json', job)
     return job
@@ -268,11 +274,20 @@ def begin(source, queue, printer, owner_pid=None):
 def record(name, pages, sheets, status, note):
     with locked():
         job = active_job()
-        ident = job.get('id', secrets.token_hex(16))
+        timestamp = dt.datetime.now().astimezone().isoformat(timespec='seconds')
+        if job.get('batch'):
+            rows = [{'id': item['id'], 'name': item['name'], 'pages': int(item['pages']),
+                     'sheets': int(item['pages']) if job.get('mode') == 'single' else (int(item['pages'])+1)//2}
+                    for item in job.get('batch_items', [])]
+        else:
+            rows = [{'id': job.get('id', secrets.token_hex(16)), 'name': job.get('name', name),
+                     'pages': int(pages), 'sheets': int(sheets)}]
         with db() as conn:
-            conn.execute('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?,?,?)', (
-                ident, dt.datetime.now().astimezone().isoformat(timespec='seconds'), job.get('name', name),
-                int(pages), int(sheets), job.get('printer', ''), status, note))
+            for row in rows:
+                conn.execute('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?,?,?)', (
+                    row['id'], timestamp, row['name'], row['pages'], row['sheets'],
+                    job.get('printer', ''), status, note))
+        return rows
 
 
 def history(query='', status='all'):
@@ -303,6 +318,47 @@ def launch_job(job):
         write('active.json', {})
         write('prompt.json', {'id': secrets.token_hex(16), 'key': 'launch_error', 'message': '', 'stage': 'error', 'buttons': []})
         raise
+
+
+CONVERSION_LOCK = threading.Lock()
+
+
+def upload_document(data, name):
+    suffix = Path(name).suffix.lower()
+    if suffix == '.pdf':
+        return upload_pdf(data, name, draft=True)
+    if suffix != '.docx' or not zipfile.is_zipfile(__import__('io').BytesIO(data)):
+        raise ValueError('unsupported_file')
+    if len(data) > MAX_UPLOAD:
+        raise ValueError('too_large')
+    initialize()
+    # Word can read/write its own sandbox without per-document file grants.
+    conversion_root = Path.home() / 'Library/Containers/com.microsoft.Word/Data/Library/Caches/HP117wConversions'
+    conversion_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with CONVERSION_LOCK, (STATE / 'conversion.lock').open('a') as conversion_lock, tempfile.TemporaryDirectory(prefix='job-', dir=conversion_root) as directory:
+        fcntl.flock(conversion_lock, fcntl.LOCK_EX)
+        source = Path(directory) / 'document.docx'
+        output = Path(directory) / 'document.pdf'
+        source.write_bytes(data)
+        try:
+            command(['/usr/bin/osascript', str(RESOURCES / 'word-to-pdf.applescript'), str(source), str(output)], timeout=180)
+            return upload_pdf(output.read_bytes(), name, draft=True)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError('conversion_failed') from error
+
+
+def enqueue_files(paths):
+    results = []
+    for filename in paths:
+        try:
+            path = Path(filename)
+            if path.stat().st_size > MAX_UPLOAD:
+                raise ValueError('too_large')
+            ident = upload_document(path.read_bytes(), path.name)
+            results.append({'name': path.name, 'id': ident})
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
+            results.append({'name': Path(filename).name, 'error': str(error)})
+    return results
 
 
 def upload_pdf(data, name, draft=False):
@@ -347,6 +403,7 @@ def reprint(data):
             row = conn.execute('SELECT * FROM records WHERE id=?', (ident,)).fetchone()
         if row is None or not source.is_file():
             raise ValueError('source_missing')
+        original_job = read('jobs/' + ident + '/job.json', {})
         first, last = data.get('first'), data.get('last')
         if type(first) is not int or type(last) is not int or not 1 <= first <= last <= row['pages']:
             raise ValueError('invalid_range')
@@ -356,6 +413,22 @@ def reprint(data):
         extracted = directory / 'source.pdf'
         pdf_command('--extract', source, extracted, first, last)
         job = new_job(extracted, row['name'] + ' (pages %s–%s)' % (first, last), mode=mode, ident=new_id)
+        if original_job.get('batch'):
+            selected_items = []
+            offset = 1
+            for item in original_job.get('batch_items', []):
+                item_start, item_end = offset, offset + int(item['pages']) - 1
+                overlap_start, overlap_end = max(first, item_start), min(last, item_end)
+                if overlap_start <= overlap_end:
+                    selected_items.append({'id': item['id'], 'name': item['name'],
+                                           'pages': overlap_end - overlap_start + 1})
+                offset = item_end + 1
+            counts = [int(item['pages']) for item in selected_items]
+            job.update(batch=True, batch_count=len(selected_items), batch_items=selected_items,
+                       batch_pages=counts, pages=sum(counts),
+                       sheets=sum(n if mode == 'single' else (n+1)//2 for n in counts),
+                       back_pages=sum((n+1)//2 for n in counts) if mode == 'duplex' else 0)
+            write('jobs/' + new_id + '/job.json', job)
         launch_job(job)
         return job['id']
 
@@ -395,7 +468,10 @@ def apply_settings(job, options):
         os.replace(temporary, job['source'])
         for preview in directory.glob('page-*.png'):
             preview.unlink()
-    job.update(mode=mode, pages=last-first+1, sheets=last-first+1 if mode == 'single' else (last-first+2)//2)
+    selected_pages = last-first+1
+    job.update(mode=mode, pages=selected_pages,
+               sheets=selected_pages if mode == 'single' else (selected_pages+1)//2,
+               back_pages=(selected_pages+1)//2 if mode == 'duplex' else 0)
     if copies > 1:
         job.update(copy_index=1, copy_total=copies)
         extra = []
@@ -448,6 +524,102 @@ def start_draft(data):
         return ident
 
 
+def start_batch(data):
+    with locked():
+        if active_job():
+            raise ValueError('busy')
+        ids = data.get('ids')
+        mode = data.get('mode', 'duplex')
+        queue = read('queue.json', [])
+        if mode not in ('duplex', 'single'):
+            raise ValueError('invalid_settings')
+        if not isinstance(ids, list) or not 2 <= len(ids) <= 30 or any(not isinstance(ident, str) for ident in ids):
+            raise ValueError('batch_too_small')
+        if len(set(ids)) != len(ids):
+            raise ValueError('invalid_request')
+        if any(not isinstance(ident, str) or ident not in queue for ident in ids):
+            raise ValueError('stale')
+        members = [get_job(ident) for ident in ids]
+        batch_id = secrets.token_hex(16)
+        directory = STATE / 'jobs' / batch_id
+        directory.mkdir(mode=0o700)
+        merged = directory / 'source.pdf'
+        try:
+            pdf_command('--merge', merged, *(member['source'] for member in members))
+            job = new_job(merged, '', mode=mode, ident=batch_id)
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        batch_items = []
+        for member in members:
+            if member.get('batch') and member.get('batch_items'):
+                batch_items.extend(member['batch_items'])
+            else:
+                batch_items.append({'id': member['id'], 'name': member['name'], 'pages': int(member['pages'])})
+        pages = [int(item['pages']) for item in batch_items]
+        if sum(pages) != int(job['pages']):
+            shutil.rmtree(directory, ignore_errors=True)
+            raise ValueError('invalid_request')
+        names = [item['name'] for item in batch_items]
+        sheets = sum(p if mode == 'single' else (p+1)//2 for p in pages)
+        job.update(name='Batch (%d): %s' % (len(batch_items), ' · '.join(names)),
+                   pages=sum(pages), sheets=sheets,
+                   back_pages=sum((p+1)//2 for p in pages) if mode == 'duplex' else 0,
+                   batch=True, batch_count=len(batch_items),
+                   batch_items=batch_items,
+                   batch_pages=pages)
+        write('jobs/' + batch_id + '/job.json', job)
+        try:
+            launch_job(job)
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        write('queue.json', [ident for ident in queue if ident not in ids])
+        return batch_id
+
+
+def active_metrics():
+    with locked():
+        job = active_job()
+        if not job:
+            raise ValueError('busy')
+        if job.get('batch'):
+            pages = int(job['pages'])
+            sheets = int(job['sheets'])
+            back_pages = int(job.get('back_pages', 0))
+            odd_docs = sum(int(item['pages']) % 2 for item in job.get('batch_items', [])) if back_pages else 0
+            return {'pages': pages, 'sheets': sheets, 'back_pages': back_pages,
+                    'odd_docs': odd_docs, 'batch': True,
+                    'batch_pages': job.get('batch_pages', [])}
+        pages = int(job['pages'])
+        mode = job.get('mode', 'duplex')
+        return {'pages': pages, 'sheets': int(job.get('sheets', pages)),
+                'back_pages': int(job.get('back_pages', (pages + 1) // 2 if mode == 'duplex' else 0)),
+                'odd_docs': int(mode == 'duplex' and pages % 2 == 1),
+                'batch': False, 'batch_pages': [pages]}
+
+
+def active_batch_counts():
+    with locked():
+        job = active_job()
+        if not job or not job.get('batch'):
+            raise ValueError('invalid_request')
+        return ','.join(str(int(n)) for n in job['batch_pages'])
+
+
+def active_batch_note():
+    with locked():
+        job = active_job()
+        if not job or not job.get('batch') or not job.get('back_pages'):
+            return ''
+        odd = [item for item in job.get('batch_items', []) if int(item['pages']) % 2]
+        if not odd:
+            return ''
+        lines = ['Odd-page PDFs (a blank back is added automatically; reload the entire stack):']
+        lines.extend('• %s (%s pages)' % (item['name'], item['pages']) for item in reversed(odd))
+        return '\n'.join(lines)
+
+
 def remove_draft(data):
     with locked():
         queue = read('queue.json', [])
@@ -470,6 +642,32 @@ def discard_cache(data):
                 shutil.move(str(item), target / item.name)
 
 
+def discard_cache_many(data):
+    ids = data.get('ids')
+    if not isinstance(ids, list) or not ids or len(ids) > 500 or any(not isinstance(ident, str) for ident in ids):
+        raise ValueError('invalid_request')
+    if len(set(ids)) != len(ids):
+        raise ValueError('invalid_request')
+    with locked():
+        queue = read('queue.json', [])
+        active_id = active_job().get('id')
+        for ident in ids:
+            get_job(ident)
+        if any(ident == active_id or ident in queue for ident in ids):
+            raise ValueError('busy')
+        trash = Path.home() / '.Trash'
+        for ident in ids:
+            source_dir = STATE / 'jobs' / ident
+            files = [item for item in source_dir.iterdir() if item.suffix in ('.pdf', '.png') and item.is_file()]
+            if not files:
+                continue
+            target = trash / ('HP117w-' + ident + '-' + str(int(time.time())) + '-' + secrets.token_hex(3))
+            target.mkdir(parents=True, exist_ok=False)
+            for item in files:
+                shutil.move(str(item), target / item.name)
+        return len(ids)
+
+
 def recover(data):
     with locked():
         job = active_job()
@@ -486,6 +684,11 @@ def recover(data):
                 job['pages'],job['sheets'],job.get('printer',''),'Interrupted; completion unconfirmed', ''))
         if action == 'restart':
             fresh = new_job(job['source'], job['name'], mode=job['mode'])
+            if job.get('batch'):
+                fresh.update(batch=True, batch_count=job.get('batch_count', len(job.get('batch_items', []))),
+                             batch_items=job.get('batch_items', []), batch_pages=job.get('batch_pages', []),
+                             pages=job['pages'], sheets=job['sheets'], back_pages=job.get('back_pages', 0))
+                write('jobs/' + fresh['id'] + '/job.json', fresh)
             write('queue.json', [fresh['id']] + read('queue.json', []))
         write('active.json', {})
         write('prompt.json', {'id':secrets.token_hex(16),'key':'idle','stage':'ready','message':'','buttons':[]})
@@ -571,7 +774,7 @@ def serve(token):
             if not self.path.startswith(prefix):
                 return self.respond(404, {})
             endpoint = self.path[len(prefix):]
-            if endpoint not in ('answer', 'upload', 'reprint', 'queue/start', 'queue/remove', 'cache/discard', 'recover'):
+            if endpoint not in ('answer', 'upload', 'reprint', 'queue/start', 'queue/batch', 'queue/remove', 'cache/discard', 'cache/discard-many', 'recover'):
                 return self.respond(404, {})
             origin = self.headers.get('Origin')
             if origin and origin != 'http://' + self.headers.get('Host', ''):
@@ -586,14 +789,14 @@ def serve(token):
                 if len(body) != size:
                     raise ValueError('invalid_request')
                 if endpoint == 'upload':
-                    if self.headers.get_content_type() != 'application/pdf':
-                        raise ValueError('invalid_pdf')
                     name = urllib.parse.unquote(self.headers.get('X-Filename', 'Uploaded.pdf'))
-                    return self.respond(202, {'id': upload_pdf(body, name, draft=True)})
+                    return self.respond(202, {'id': upload_document(body, name)})
                 data = json.loads(body)
                 if not isinstance(data, dict):
                     raise ValueError('invalid_request')
-                actions = {'queue/start': start_draft, 'queue/remove': remove_draft, 'cache/discard': discard_cache, 'recover': recover}
+                actions = {'queue/start': start_draft, 'queue/batch': start_batch,
+                           'queue/remove': remove_draft, 'cache/discard': discard_cache,
+                           'cache/discard-many': discard_cache_many, 'recover': recover}
                 if endpoint in actions:
                     return self.respond(200, {'id': actions[endpoint](data)})
                 if endpoint == 'reprint':
@@ -675,11 +878,27 @@ def main():
         serve(token)
     elif cmd == 'start':
         print(start(token))
+    elif cmd == 'enqueue':
+        url = start(token)
+        results = enqueue_files(args)
+        command(['/usr/bin/open', url])
+        failures = [r for r in results if 'error' in r]
+        if failures:
+            message = '\n'.join(r['name'] + ': ' + r['error'] for r in failures)
+            command(['/usr/bin/osascript', '-e', 'on run argv', '-e', 'display dialog (item 1 of argv) with title "部分文件未加入 / Files not added" buttons {"OK"} default button 1', '-e', 'end run', message], timeout=300)
+        print(json.dumps(results, ensure_ascii=False))
     elif cmd == 'begin':
         print(begin(*args))
     elif cmd == 'mode':
         with locked():
             print(active_job()['mode'])
+    elif cmd == 'metrics':
+        metrics = active_metrics()
+        print('|'.join(str(metrics[key]) for key in ('pages', 'sheets', 'back_pages', 'odd_docs', 'batch')))
+    elif cmd == 'batch-pages':
+        print(active_batch_counts())
+    elif cmd == 'batch-note':
+        print(active_batch_note())
     elif cmd == 'source':
         with locked():
             print(active_job()['source'])
@@ -692,7 +911,9 @@ def main():
     elif cmd == 'wait':
         print(wait_queue(*args))
     elif cmd == 'record':
-        record(*args)
+        rows = record(*args)
+        for row in rows:
+            print('%s\t%s\t%s' % (row['name'], row['pages'], row['sheets']))
     elif cmd == 'finish':
         with locked():
             write('active.json', {})

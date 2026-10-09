@@ -57,7 +57,7 @@ on waitForFinalPass(waitMessage)
 end waitForFinalPass
 
 on printPDF(pdfPath, jobTitle)
-	set replyText to «event sysoexec» "/usr/bin/lp -d " & quoted form of queueName & " -n 1 -t " & quoted form of jobTitle & " -o sides=one-sided -o media=A4 -o fit-to-page -o number-up=1 -o page-set=all -o outputorder=normal -o orientation-requested=3 -o mirror=false -o ColorModel=Gray -- " & quoted form of pdfPath
+	set replyText to «event sysoexec» "/usr/bin/lp -d " & quoted form of queueName & " -n 1 -t " & quoted form of jobTitle & " -o sides=one-sided -o media=A4 -o fit-to-page -o number-up=1 -o page-set=all -o outputorder=normal -o orientation-requested=3 -o mirror=false -o ColorModel=Gray -o print-blank-pages=true -- " & quoted form of pdfPath
 	if replyText does not contain "request id is " then error "The print system did not confirm submission. Check Print Center before trying again."
 end printPDF
 
@@ -67,7 +67,19 @@ end printLogPath
 
 on appendPrintLog(pdfName, pageCount, sheetCount, statusText, noteText)
 	set helperPath to POSIX path of (path to resource "mobile.py")
-	do shell script quoted form of mobilePython & " " & quoted form of helperPath & " record " & quoted form of pdfName & " " & pageCount & " " & sheetCount & " " & quoted form of statusText & " " & quoted form of noteText
+	set recordRowsText to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " record " & quoted form of pdfName & " " & pageCount & " " & sheetCount & " " & quoted form of statusText & " " & quoted form of noteText
+	set oldDelimiters to AppleScript's text item delimiters
+	set recordLines to paragraphs of recordRowsText
+	set AppleScript's text item delimiters to tab
+	set excelRows to {}
+	repeat with recordLine in recordLines
+		set rowParts to text items of (recordLine as text)
+		if (count of rowParts) is 3 then
+			set end of excelRows to {«event misccurd», item 1 of rowParts, (item 2 of rowParts) as integer, (item 3 of rowParts) as integer, printerLabel, statusText, noteText}
+		end if
+	end repeat
+	set AppleScript's text item delimiters to oldDelimiters
+	if (count of excelRows) is 0 then error "The print record could not be formatted for Excel."
 	set logPath to my printLogPath()
 	set excelWasRunning to false
 	try
@@ -99,8 +111,9 @@ on appendPrintLog(pdfName, pageCount, sheetCount, statusText, noteText)
 			set logSheet to «class XwSH» 1 of logWorkbook
 			set logRegion to «class 1542» of «class X117» "A1" of logSheet
 			set nextRow to (count of every «class crow» of logRegion) + 1
-			set rowAddress to "A" & (nextRow as text) & ":G" & (nextRow as text)
-			set «class DPVu» of «class X117» rowAddress of logSheet to {{«event misccurd», pdfName, pageCount, sheetCount, printerLabel, statusText, noteText}}
+			set lastRow to nextRow + (count of excelRows) - 1
+			set rowAddress to "A" & (nextRow as text) & ":G" & (lastRow as text)
+			set «class DPVu» of «class X117» rowAddress of logSheet to excelRows
 			save logWorkbook
 			if createdWorkbook then close logWorkbook saving no
 			if excelWasRunning then
@@ -160,7 +173,14 @@ on showControlPage(mobileURL)
 end showControlPage
 
 on processPDFs(theFiles, optionsText)
-	if (count of theFiles) is not 1 then error "Choose one PDF at a time."
+	if (count of theFiles) is not 1 or ((POSIX path of (item 1 of theFiles)) ends with ".docx") then
+        set enqueueCommand to quoted form of mobilePython & " " & quoted form of (POSIX path of (path to resource "mobile.py")) & " enqueue"
+        repeat with selectedFile in theFiles
+            set enqueueCommand to enqueueCommand & " " & quoted form of (POSIX path of selectedFile)
+        end repeat
+        do shell script enqueueCommand
+        return
+    end if
 	set helperPath to POSIX path of (path to resource "mobile.py")
 	set keepAwakePID to ""
 	set sourcePath to POSIX path of (item 1 of theFiles)
@@ -193,13 +213,23 @@ on processMobilePDFs(theFiles, optionsText)
 	set pdfName to ""
 	set pageCount to 0
 	set sheetCount to 0
+	set backPageCount to 0
+	set oddSheetCount to 0
+	set isBatch to false
 	set noteText to ""
 	set printStatus to ""
 	set logSaved to false
 	set logErrorText to ""
 	set logPath to my printLogPath()
 	try
-		if (count of theFiles) is not 1 then error "Choose one PDF at a time."
+		if (count of theFiles) is not 1 or ((POSIX path of (item 1 of theFiles)) ends with ".docx") then
+        set enqueueCommand to quoted form of mobilePython & " " & quoted form of (POSIX path of (path to resource "mobile.py")) & " enqueue"
+        repeat with selectedFile in theFiles
+            set enqueueCommand to enqueueCommand & " " & quoted form of (POSIX path of selectedFile)
+        end repeat
+        do shell script enqueueCommand
+        return
+    end if
 		set workerPath to POSIX path of («event sysorpth» "duplex.js")
 		set helperPath to POSIX path of (path to resource "mobile.py")
 		set pdfPath to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " source"
@@ -208,22 +238,65 @@ on processMobilePDFs(theFiles, optionsText)
 		if pdfName ends with ".pdf.pdf" then set pdfName to text 1 thru ((count of pdfName) - 4) of pdfName
 		set tempDir to «event sysoexec» "/usr/bin/mktemp -d -t hp117w-duplex"
 		set pageCount to («event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --count " & quoted form of pdfPath) as integer
-		set sheetCount to (pageCount + 1) div 2
-		if currentMode is "single" then set sheetCount to pageCount
-		set oddCount to (pageCount mod 2 is 1) and pageCount > 1 and currentMode is not "single"
+		set helperPath to POSIX path of (path to resource "mobile.py")
+		set metricText to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " metrics"
+		set oldDelimiters to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to "|"
+		set metricParts to text items of metricText
+		set AppleScript's text item delimiters to oldDelimiters
+		set pageCount to (item 1 of metricParts) as integer
+		set sheetCount to (item 2 of metricParts) as integer
+		set backPageCount to (item 3 of metricParts) as integer
+		set oddSheetCount to (item 4 of metricParts) as integer
+		set isBatch to (item 5 of metricParts is "True")
+		set oddCount to oddSheetCount > 0
 
-		set firstPassDescription to "First: every other page of the supplied PDF, in ascending order."
-		set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1–" & pageCount & "." & return & "A4, black and white, one copy, one page per side." & return & return & pageCount & " pages / " & sheetCount & " sheets." & return & firstPassDescription & return & "Pause: reload and tap Continue on your iPhone." & return & "Last: remaining pages in reverse order, rotated 180 degrees."
-		if oddCount then set intro to intro & return & return & "Odd number of pages: set aside the last sheet before reloading. Its back stays blank."
-		if pageCount is 1 then set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: 1." & return & "A4, black and white, one copy." & return & return & "Only one side will print."
+		if currentMode is "single" then
+			set firstPassDescription to "Print every page single-sided, in waiting-list order."
+		else if isBatch then
+			set firstPassDescription to "First: all front sides, in the waiting-list order."
+		else
+			set firstPassDescription to "First: every other page of the supplied PDF, in ascending order."
+		end if
+		set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages in the supplied PDF: " & pageCount & "." & return & "A4, black and white, one copy of each selected PDF, one page per side." & return & return & pageCount & " pages / " & sheetCount & " sheets." & return & firstPassDescription
+		if backPageCount > 0 then set intro to intro & return & "Pause: reload and tap Continue on your iPhone." & return & "Last: back sides in reverse order, rotated 180 degrees."
+		if oddCount then
+			if isBatch then
+				set oddFilesText to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " batch-note"
+				set intro to intro & return & return & oddFilesText
+			else
+				set intro to intro & return & return & "Odd number of pages: a blank back is added automatically. Reload every sheet."
+			end if
+		end if
+		if backPageCount is 0 then
+			if currentMode is "single" then
+				set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages: " & pageCount & "." & return & "A4, black and white, single-sided." & return & return & "All pages will print once; there is no reload step."
+			else
+				set intro to "File: " & pdfName & return & "Printer: " & printerLabel & return & "Pages: " & pageCount & "." & return & "A4, black and white, one copy." & return & return & "Only front sides will print; there is no back-side pass."
+			end if
+		end if
 		set intro to intro & return & return & "Nothing prints until you click Print First Side."
 		my askUser(intro, "Print First Side")
 		set currentMode to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " mode"
-		set pageCount to (do shell script "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --count " & quoted form of pdfPath) as integer
-		set sheetCount to (pageCount + 1) div 2
-		if currentMode is "single" then set sheetCount to pageCount
-		set oddCount to (pageCount mod 2 is 1) and pageCount > 1 and currentMode is not "single"
-		set prepareResult to «event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --prepare " & quoted form of pdfPath & " " & quoted form of tempDir & " 1 " & (pageCount as text)
+		set metricText to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " metrics"
+		set oldDelimiters to AppleScript's text item delimiters
+		set AppleScript's text item delimiters to "|"
+		set metricParts to text items of metricText
+		set AppleScript's text item delimiters to oldDelimiters
+		set pageCount to (item 1 of metricParts) as integer
+		set sheetCount to (item 2 of metricParts) as integer
+		set backPageCount to (item 3 of metricParts) as integer
+		set oddSheetCount to (item 4 of metricParts) as integer
+		set isBatch to (item 5 of metricParts is "True")
+		set oddCount to oddSheetCount > 0
+		if currentMode is not "single" then
+			if isBatch then
+				set batchCounts to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " batch-pages"
+				set prepareResult to «event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --prepare-batch " & quoted form of pdfPath & " " & quoted form of tempDir & " " & quoted form of batchCounts
+			else
+				set prepareResult to «event sysoexec» "/usr/bin/osascript -l JavaScript " & quoted form of workerPath & " --prepare " & quoted form of pdfPath & " " & quoted form of tempDir & " 1 " & (pageCount as text)
+			end if
+		end if
 		if my pendingJobs() is not "" then error "The printer has unfinished jobs. Wait for them to finish and start this helper again. This helper has not printed anything."
 		set firstAttempted to true
 		if currentMode is "single" then
@@ -232,11 +305,12 @@ on processMobilePDFs(theFiles, optionsText)
 			my printPDF(tempDir & "/odd.pdf", "HP117w manual duplex - odd pages")
 		end if
 		set firstSubmitted to true
-		if pageCount > 1 and currentMode is not "single" then
+		if backPageCount > 0 then
 			my waitForQueue("front_wait")
 			set reloadText to "Wait until all " & sheetCount & " front-side sheets have completely printed." & return & return
-			if oddCount then set reloadText to reloadText & "Odd number of pages: set aside the last sheet and leave its back blank." & return & return
-			set reloadText to reloadText & "Reload the printed stack using your previously tested method: do not flip, rotate, or rearrange it. Place no unused sheets ahead of it." & return & return & "Continue only after every front side has printed successfully and the stack is reloaded. Back sides will print in reverse order, rotated 180 degrees." & return & return & "If the first pass failed or was cancelled, tap Cancel remaining steps."
+			if oddCount and isBatch then set reloadText to reloadText & (do shell script quoted form of mobilePython & " " & quoted form of helperPath & " batch-note") & return & return
+			if oddCount and not isBatch then set reloadText to reloadText & "Odd number of pages: a blank back is added automatically. Reload every sheet." & return & return
+			set reloadText to reloadText & "The stack comes out top-to-bottom from last page to first page. Put the entire stack directly into the feed tray in that order. Do not rearrange or manually rotate the sheets; the back pages are already reversed and rotated 180 degrees. Place no unused sheets ahead of it." & return & return & "Continue only after every front side has printed successfully and the stack is reloaded." & return & return & "If the first pass failed or was cancelled, tap Cancel remaining steps."
 			repeat
 				my askUser(reloadText, "Continue")
 				if my pendingJobs() is "" then exit repeat
@@ -246,8 +320,8 @@ on processMobilePDFs(theFiles, optionsText)
 			my printPDF(tempDir & "/even.pdf", "HP117w manual duplex - even pages")
 			set secondSubmitted to true
 		end if
-		if pageCount is 1 or currentMode is "single" then
-			set finalPassMessage to "Wait until the single page has completely printed. The print log note will appear afterward."
+		if backPageCount is 0 or currentMode is "single" then
+			set finalPassMessage to "Wait until all " & sheetCount & " printed sheets have completely printed. The print log note will appear afterward."
 		else
 			set finalPassMessage to "Wait until all " & sheetCount & " final-side sheets have completely printed. The print log note will appear afterward."
 		end if
@@ -269,9 +343,9 @@ on processMobilePDFs(theFiles, optionsText)
 				set printStatus to "Both sides submitted; completion unconfirmed"
 			else if secondAttempted then
 				set printStatus to "Partial: second side not confirmed"
-			else if firstSubmitted and (pageCount is 1 or currentMode is "single") and finalPassFinished then
+			else if firstSubmitted and (backPageCount is 0 or currentMode is "single") and finalPassFinished then
 				set printStatus to "Printed"
-			else if firstSubmitted and (pageCount is 1 or currentMode is "single") then
+			else if firstSubmitted and (backPageCount is 0 or currentMode is "single") then
 				set printStatus to "Single side submitted; completion unconfirmed"
 			else if firstSubmitted then
 				set printStatus to "Partial: first side only"
