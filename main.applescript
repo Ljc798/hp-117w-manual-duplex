@@ -137,39 +137,8 @@ on appendPrintLog(pdfName, pageCount, sheetCount, statusText, noteText)
 end appendPrintLog
 
 on showControlPage(mobileURL)
-	if application "Google Chrome" is running then
-		tell application "Google Chrome"
-			repeat with browserWindow in windows
-				set tabNumber to 0
-				repeat with browserTab in tabs of browserWindow
-					set tabNumber to tabNumber + 1
-					if URL of browserTab starts with mobileURL then
-						set active tab index of browserWindow to tabNumber
-						set minimized of browserWindow to false
-						set index of browserWindow to 1
-						activate
-						return
-					end if
-				end repeat
-			end repeat
-		end tell
-	end if
-	if application "Safari" is running then
-		tell application "Safari"
-			repeat with browserWindow in windows
-				repeat with browserTab in tabs of browserWindow
-					if URL of browserTab starts with mobileURL then
-						set current tab of browserWindow to browserTab
-						set miniaturized of browserWindow to false
-						set index of browserWindow to 1
-						activate
-						return
-					end if
-				end repeat
-			end repeat
-		end tell
-	end if
-	open location mobileURL
+    set helperPath to POSIX path of (path to resource "mobile.py")
+    do shell script quoted form of mobilePython & " " & quoted form of helperPath & " open-control " & quoted form of mobileURL
 end showControlPage
 
 on processPDFs(theFiles, optionsText)

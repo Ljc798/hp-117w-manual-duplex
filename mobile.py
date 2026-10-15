@@ -347,6 +347,31 @@ def upload_document(data, name):
             raise ValueError('conversion_failed') from error
 
 
+def open_control(url, token):
+    initialize()
+    with (STATE / 'browser.lock').open('a') as browser_lock:
+        fcntl.flock(browser_lock, fcntl.LOCK_EX)
+        descriptors = []
+        processes = command(['/bin/ps', '-ax', '-o', 'pid=,command='])
+        for line in processes.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid, executable = parts
+            # Target the GUI process by PID: a headless Chrome instance has the
+            # same bundle ID and can otherwise intercept application scripting.
+            if '--headless' in executable:
+                continue
+            if executable.startswith('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome') and not executable.startswith('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper'):
+                descriptors.append({'pid': int(pid), 'kind': 'chrome'})
+            elif executable in ('/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Contents/MacOS/Safari', '/Applications/Safari.app/Contents/MacOS/Safari', '/System/Applications/Safari.app/Contents/MacOS/Safari'):
+                descriptors.append({'pid': int(pid), 'kind': 'safari'})
+        result = command(['/usr/bin/osascript', '-l', 'JavaScript', str(RESOURCES / 'open-control.js'), url, '/' + token + '/', json.dumps(descriptors)], timeout=60)
+        if result == 'no-browser':
+            command(['/usr/bin/open', '-a', 'Safari', url])
+        return result
+
+
 def enqueue_files(paths):
     results = []
     for filename in paths:
@@ -510,6 +535,24 @@ def library():
         return {'queue': jobs, 'cache': cached, 'bytes': sum(j['bytes'] for j in cached)}
 
 
+def selected_draft(job, options):
+    first, last, _, _ = validate_settings(job, options or {})
+    if first == 1 and last == int(job['pages']):
+        return job
+    if job.get('batch'):
+        raise ValueError('invalid_settings')
+    ident = secrets.token_hex(16)
+    directory = STATE / 'jobs' / ident
+    directory.mkdir(mode=0o700)
+    try:
+        pdf_command('--extract', job['source'], directory / 'source.pdf', first, last)
+        selected = new_job(directory / 'source.pdf', job['name'] + ' (%s–%s)' % (first, last), mode=job['mode'], ident=ident)
+        return selected
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
 def start_draft(data):
     with locked():
         if active_job():
@@ -518,7 +561,7 @@ def start_draft(data):
         queue = read('queue.json', [])
         if ident not in queue:
             raise ValueError('stale')
-        job = get_job(ident)
+        job = selected_draft(get_job(ident), data.get('range', {}))
         launch_job(job)
         write('queue.json', [i for i in queue if i != ident])
         return ident
@@ -539,7 +582,13 @@ def start_batch(data):
             raise ValueError('invalid_request')
         if any(not isinstance(ident, str) or ident not in queue for ident in ids):
             raise ValueError('stale')
-        members = [get_job(ident) for ident in ids]
+        ranges = data.get('ranges', {})
+        if not isinstance(ranges, dict):
+            raise ValueError('invalid_request')
+        originals = [get_job(ident) for ident in ids]
+        for member in originals:
+            validate_settings(member, ranges.get(member['id'], {}))
+        members = [selected_draft(member, ranges.get(member['id'], {})) for member in originals]
         batch_id = secrets.token_hex(16)
         directory = STATE / 'jobs' / batch_id
         directory.mkdir(mode=0o700)
@@ -878,10 +927,12 @@ def main():
         serve(token)
     elif cmd == 'start':
         print(start(token))
+    elif cmd == 'open-control':
+        open_control(args[0], token)
     elif cmd == 'enqueue':
         url = start(token)
         results = enqueue_files(args)
-        command(['/usr/bin/open', url])
+        open_control(url, token)
         failures = [r for r in results if 'error' in r]
         if failures:
             message = '\n'.join(r['name'] + ': ' + r['error'] for r in failures)

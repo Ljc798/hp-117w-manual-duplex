@@ -60,7 +60,7 @@
 
 ### 限制
 
-- A4、黑白、每页一面为固定设置。批量打印使用所选文件的完整页数，每份一套；需要选页或打印多份时，逐份预览并设置。
+- A4、黑白、每页一面为固定设置。待打印列表可分别设置每份文件的起止页，合并打印也使用各自所选范围，每份一套；需要多份时，逐份预览并设置。
 - 页数是 PDF 服务交来的 PDF 页数；日志不包含源文件里的原始页码范围。
 - 备注在打印结束后出现。
 - `install.sh` 会将旧应用备份到相邻的 `.backup.<时间>` 路径。
@@ -122,7 +122,7 @@ This repository is configured for the HP Laser MFP 117w queue and its manual pap
 
 ### Limitations
 
-- A4, black and white, and one page per side are fixed settings. A batch uses each selected PDF in full, one copy each; review files individually to select ranges or extra copies.
+- A4, black and white, and one page per side are fixed settings. Set each file’s page range in the waiting list; batches use those selected ranges, one copy each. Review files individually for extra copies.
 - The page count is for the PDF received by the service; the log does not include the original document page range.
 - The optional note prompt appears after printing.
 - `install.sh` backs up an existing app beside it as `.backup.<timestamp>`.

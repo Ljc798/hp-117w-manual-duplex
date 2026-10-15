@@ -7,5 +7,7 @@ if [ -z "$SPOOL" ] || [ ! -f "$SPOOL" ]; then
 	exit 0
 fi
 
-/usr/bin/open -a "$APP" "$SPOOL" >/dev/null 2>&1 || true
+# Bypass the applet: it may already be waiting for the current print session.
+PYTHON=$(/usr/bin/plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/local.hp117w.mobile.plist")
+"$PYTHON" "$APP/Contents/Resources/mobile.py" enqueue "$SPOOL"
 exit 0

@@ -30,6 +30,7 @@ pathlib.Path(sys.argv[2]).write_text(source)
 PYCODE
 /usr/bin/osacompile -o "$NEW_APP" "$BUILD/main.applescript"
 cp "$ROOT/mobile.html" "$NEW_APP/Contents/Resources/mobile.html"
+cp "$ROOT/open-control.js" "$NEW_APP/Contents/Resources/open-control.js"
 cp "$ROOT/word-to-pdf.applescript" "$NEW_APP/Contents/Resources/word-to-pdf.applescript"
 cp "$ROOT/mobile.py" "$NEW_APP/Contents/Resources/mobile.py"
 cp "$ROOT/duplex.js" "$NEW_APP/Contents/Resources/duplex.js"
