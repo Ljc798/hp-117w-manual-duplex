@@ -35,6 +35,7 @@ cp "$ROOT/word-to-pdf.applescript" "$NEW_APP/Contents/Resources/word-to-pdf.appl
 cp "$ROOT/mobile.py" "$NEW_APP/Contents/Resources/mobile.py"
 cp "$ROOT/duplex.js" "$NEW_APP/Contents/Resources/duplex.js"
 cp "$ROOT/Info.plist" "$NEW_APP/Contents/Info.plist"
+rm -rf "$NEW_APP/Contents/Resources/__pycache__"
 /usr/bin/codesign --force --deep --sign - "$NEW_APP"
 
 if [ -e "$APP" ]; then
@@ -57,10 +58,16 @@ agent.write_bytes(plistlib.dumps({
     'Label':'local.hp117w.mobile',
     'ProgramArguments':[sys.argv[2],sys.argv[1]+'/Contents/Resources/mobile.py','serve'],
     'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':10,
+    'EnvironmentVariables':{'PYTHONDONTWRITEBYTECODE':'1'},
     'StandardOutPath':str(state/'server.log'),'StandardErrorPath':str(state/'server.log'),
     'LimitLoadToSessionType':'Aqua'
 }))
 PYAGENT
+
+# Reload the service so it runs the just-installed helper and environment.
+LAUNCHCTL="$(command -v launchctl)"
+"$LAUNCHCTL" bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.hp117w.mobile.plist" 2>/dev/null || true
+"$LAUNCHCTL" bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.hp117w.mobile.plist"
 
 if [ ! -f "$HOME/Documents/HP 117w Manual Duplex Print Log.xlsx" ]; then
   echo "Create an Excel workbook named HP 117w Manual Duplex Print Log.xlsx in Documents."

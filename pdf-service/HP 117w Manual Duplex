@@ -1,13 +1,17 @@
 #!/bin/bash
-
+set -u
 APP="$HOME/Applications/HP 117w Manual Duplex.app"
 SPOOL="${3:-}"
-
-if [ -z "$SPOOL" ] || [ ! -f "$SPOOL" ]; then
-	exit 0
+if [ ! -f "$SPOOL" ]; then
+    for candidate in "$@"; do
+        if [ -f "$candidate" ]; then SPOOL="$candidate"; fi
+    done
 fi
-
-# Bypass the applet: it may already be waiting for the current print session.
-PYTHON=$(/usr/bin/plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/local.hp117w.mobile.plist")
-"$PYTHON" "$APP/Contents/Resources/mobile.py" enqueue "$SPOOL"
-exit 0
+if [ -z "$SPOOL" ]; then
+    /usr/bin/osascript -e 'display dialog "macOS 没有传入可读取的 PDF 文件，请重新打开打印窗口后再试。" with title "HP 117w" buttons {"OK"}'
+    exit 1
+fi
+if ! /usr/bin/open -n -a "$APP" "$SPOOL"; then
+    /usr/bin/osascript -e 'display dialog "无法启动 HP 117w 手动双面打印，请重新运行安装程序。" with title "HP 117w" buttons {"OK"}'
+    exit 1
+fi

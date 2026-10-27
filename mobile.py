@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -135,6 +136,13 @@ def owner_alive(job):
 def active_job():
     job = read('active.json', {})
     if job.get('pending') and time.time() - job.get('reserved_at', 0) > 90:
+        # A handoff that never reached the AppleScript app must not consume
+        # the user's queued document. Put it back at the front for retry.
+        ident = job.get('id')
+        source = Path(job.get('source', '')) if job.get('source') else None
+        queue = read('queue.json', [])
+        if ident and source and source.is_file() and ident not in queue:
+            write('queue.json', [ident] + queue)
         write('active.json', {})
         write('prompt.json', {'id': secrets.token_hex(16), 'key': 'launch_error', 'message': '', 'stage': 'error', 'buttons': []})
         return {}
@@ -254,6 +262,14 @@ def new_job(source, name, queue='', printer='', mode='duplex', ident=None):
     return job
 
 
+def is_pending_source(source):
+    """Only the web controller's reserved document may start the print worker."""
+    with locked():
+        current = active_job()
+        return bool(current.get('pending') and current.get('source') and
+                    Path(current['source']).resolve() == Path(source).resolve())
+
+
 def begin(source, queue, printer, owner_pid=None):
     with locked():
         current = active_job()
@@ -306,7 +322,9 @@ def history(query='', status='all'):
 
 
 def open_app(source):
-    subprocess.run(['/usr/bin/open', '-a', str(APP), source], check=True, timeout=15)
+    # The intake applet may still be exiting when the user starts its queued
+    # file. A fresh worker avoids Launch Services targeting that dying process.
+    subprocess.run(['/usr/bin/open', '-n', '-a', str(APP), source], check=True, timeout=15)
 
 
 def launch_job(job):
@@ -325,26 +343,42 @@ CONVERSION_LOCK = threading.Lock()
 
 def upload_document(data, name):
     suffix = Path(name).suffix.lower()
-    if suffix == '.pdf':
+    if suffix == '.pdf' or b'%PDF-' in data[:1024]:
         return upload_pdf(data, name, draft=True)
     if suffix != '.docx' or not zipfile.is_zipfile(__import__('io').BytesIO(data)):
         raise ValueError('unsupported_file')
     if len(data) > MAX_UPLOAD:
         raise ValueError('too_large')
     initialize()
-    # Word can read/write its own sandbox without per-document file grants.
-    conversion_root = Path.home() / 'Library/Containers/com.microsoft.Word/Data/Library/Caches/HP117wConversions'
-    conversion_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with CONVERSION_LOCK, (STATE / 'conversion.lock').open('a') as conversion_lock, tempfile.TemporaryDirectory(prefix='job-', dir=conversion_root) as directory:
+    # Finder workflows and the login service have different macOS privacy
+    # identities. Never require the caller to access Word's private container.
+    with CONVERSION_LOCK, (STATE / 'conversion.lock').open('a') as conversion_lock:
         fcntl.flock(conversion_lock, fcntl.LOCK_EX)
-        source = Path(directory) / 'document.docx'
-        output = Path(directory) / 'document.pdf'
-        source.write_bytes(data)
+        conversion_root = Path.home() / 'Library/Containers/com.microsoft.Word/Data/Library/Caches/HP117wConversions'
         try:
+            conversion_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory = Path(tempfile.mkdtemp(prefix='job-', dir=conversion_root))
+            temporary_directory = True
+        except PermissionError:
+            # A stable folder AND stable filenames let Word retain a single
+            # file/folder grant instead of prompting for every new job folder.
+            directory = STATE / 'WordConversion'
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temporary_directory = False
+        source = directory / 'document.docx'
+        output = directory / 'document.pdf'
+        try:
+            output.unlink(missing_ok=True)
+            source.write_bytes(data)
             command(['/usr/bin/osascript', str(RESOURCES / 'word-to-pdf.applescript'), str(source), str(output)], timeout=180)
             return upload_pdf(output.read_bytes(), name, draft=True)
         except (OSError, subprocess.SubprocessError) as error:
             raise ValueError('conversion_failed') from error
+        finally:
+            source.unlink(missing_ok=True)
+            output.unlink(missing_ok=True)
+            if temporary_directory:
+                directory.rmdir()
 
 
 def open_control(url, token):
@@ -379,7 +413,16 @@ def enqueue_files(paths):
             path = Path(filename)
             if path.stat().st_size > MAX_UPLOAD:
                 raise ValueError('too_large')
-            ident = upload_document(path.read_bytes(), path.name)
+            # All entry points use the same service identity for Word access.
+            token = (STATE / 'token').read_text()
+            request = urllib.request.Request('http://127.0.0.1:%d/%s/upload' % (PORT, token),
+                data=path.read_bytes(), headers={'Content-Type': 'application/octet-stream',
+                'X-Filename': urllib.parse.quote(path.name)}, method='POST')
+            try:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=240) as response:
+                    ident = json.load(response)['id']
+            except urllib.error.HTTPError as error:
+                raise ValueError(json.load(error).get('error', 'operation_failed')) from error
             results.append({'name': path.name, 'id': ident})
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             results.append({'name': Path(filename).name, 'error': str(error)})
@@ -911,7 +954,11 @@ def start(token):
     host = command(['/usr/sbin/scutil', '--get', 'LocalHostName']) + '.local'
     url = 'http://%s:%d/%s/' % (host, PORT, token)
     # CoreImage QR encoding must be ASCII, including the existing fixed token.
-    pdf_command('--qr', url, STATE / 'qr.png')
+    if not (STATE / 'qr.png').exists():
+        try:
+            pdf_command('--qr', url, STATE / 'qr.png')
+        except (OSError, subprocess.SubprocessError):
+            pass  # QR generation must not block file intake or the control page.
     return url
 
 
@@ -929,10 +976,21 @@ def main():
         print(start(token))
     elif cmd == 'open-control':
         open_control(args[0], token)
+    elif cmd == 'enqueue-files':
+        results = enqueue_files(args)
+        failures = [r for r in results if 'error' in r]
+        if failures:
+            raise RuntimeError('\n'.join(r['name'] + ': ' + r['error'] for r in failures))
     elif cmd == 'enqueue':
         url = start(token)
+        try:
+            open_control(url, token)
+        except (OSError, subprocess.SubprocessError) as error:
+            with (STATE / 'intake.log').open('a') as log:
+                log.write(str(error) + '\n')
         results = enqueue_files(args)
-        open_control(url, token)
+        with (STATE / 'intake.log').open('a') as log:
+            log.write(dt.datetime.now().isoformat() + ' ' + json.dumps(results, ensure_ascii=False) + '\n')
         failures = [r for r in results if 'error' in r]
         if failures:
             message = '\n'.join(r['name'] + ': ' + r['error'] for r in failures)
@@ -940,6 +998,8 @@ def main():
         print(json.dumps(results, ensure_ascii=False))
     elif cmd == 'begin':
         print(begin(*args))
+    elif cmd == 'pending-source':
+        print('yes' if is_pending_source(args[0]) else 'no')
     elif cmd == 'mode':
         with locked():
             print(active_job()['mode'])

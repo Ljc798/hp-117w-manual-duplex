@@ -79,6 +79,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(mobile.begin(job['source'], 'queue', 'Printer'), 'duplex')
         self.assertEqual(mobile.active_job()['id'], ident)
         self.assertFalse(mobile.active_job()['pending'])
+    def test_only_reserved_source_routes_to_print_worker(self):
+        self.assertFalse(mobile.is_pending_source(self.pdf))
+        with patch.object(mobile, 'open_app'):
+            mobile.upload_pdf(self.pdf.read_bytes(), 'Reserved.pdf')
+        job = mobile.active_job()
+        self.assertTrue(mobile.is_pending_source(job['source']))
+        self.assertFalse(mobile.is_pending_source(self.pdf))
+        mobile.begin(job['source'], 'queue', 'Printer')
+        self.assertFalse(mobile.is_pending_source(job['source']))
+        self.assertFalse(mobile.is_pending_source(self.pdf))
     def test_history_record_preserves_partial_status(self):
         mobile.begin(self.pdf, 'queue', 'Printer')
         mobile.record('test.pdf', 7, 4, 'Partial: first side only', 'Notes')

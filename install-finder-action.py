@@ -8,7 +8,8 @@ app, python = sys.argv[1:]
 name = 'HP 117w 打印 — 打开网页'
 contents = Path.home() / 'Library/Services' / (name + '.workflow') / 'Contents'
 contents.mkdir(parents=True, exist_ok=True)
-script = shlex.quote(python) + ' ' + shlex.quote(app + '/Contents/Resources/mobile.py') + ' enqueue "$@"'
+mobile = str(Path(app) / 'Contents/Resources/mobile.py')
+script = shlex.quote(python) + ' ' + shlex.quote(mobile) + ' enqueue "$@"'
 action = {
     'AMAccepts': {'Container': 'List', 'Optional': False, 'Types': ['com.apple.cocoa.string']},
     'AMProvides': {'Container': 'List', 'Types': ['com.apple.cocoa.string']},

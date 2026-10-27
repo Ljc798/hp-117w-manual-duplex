@@ -142,14 +142,21 @@ on showControlPage(mobileURL)
 end showControlPage
 
 on processPDFs(theFiles, optionsText)
-	if (count of theFiles) is not 1 or ((POSIX path of (item 1 of theFiles)) ends with ".docx") then
-        set enqueueCommand to quoted form of mobilePython & " " & quoted form of (POSIX path of (path to resource "mobile.py")) & " enqueue"
-        repeat with selectedFile in theFiles
-            set enqueueCommand to enqueueCommand & " " & quoted form of (POSIX path of selectedFile)
-        end repeat
-        do shell script enqueueCommand
-        return
-    end if
+	set helperPath to POSIX path of (path to resource "mobile.py")
+	set isPrintWorker to false
+	if (count of theFiles) is 1 then
+		set sourcePath to POSIX path of (item 1 of theFiles)
+		set workerReply to do shell script quoted form of mobilePython & " " & quoted form of helperPath & " pending-source " & quoted form of sourcePath
+		set isPrintWorker to workerReply is "yes"
+	end if
+	if not isPrintWorker then
+		set enqueueCommand to quoted form of mobilePython & " " & quoted form of (POSIX path of (path to resource "mobile.py")) & " enqueue"
+		repeat with selectedFile in theFiles
+			set enqueueCommand to enqueueCommand & " " & quoted form of (POSIX path of selectedFile)
+		end repeat
+		do shell script enqueueCommand
+		return
+	end if
 	set helperPath to POSIX path of (path to resource "mobile.py")
 	set keepAwakePID to ""
 	set sourcePath to POSIX path of (item 1 of theFiles)
